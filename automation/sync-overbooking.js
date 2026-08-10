@@ -40,6 +40,16 @@ const CONFIG = {
   dryRun: process.env.DRY_RUN !== 'false',
   sites: ['urakata', 'jalan', 'aj'],
 };
+// 定員マスターのセル記号。似た見た目の別コードポイントが多く、取りこぼすと
+// 「空欄＝既定」と誤読して閉じたはずの枠を売ってしまうため、まとめて定義する。
+//   x X Ｘ ×(00D7) ☓(2613) ✕(2715) ✖(2716) ✗(2717) ✘(2718) ❌(274C) ❎(274E) 🗙(1F5D9)
+const STOP_RE    = /^[xXＸ×☓✕✖✗✘❌❎🗙]$/u;
+// リクエスト強制の記号。IMEで「さんかく」を変換すると △▲▽▼∆⊿ が候補に出るため
+// まとめて拾う。取りこぼすと「未知」＝安全側の受付停止に倒れ、リクエストに
+// したい枠が閉じてしまう。
+//   △(25B3) ▲(25B2) ▵(25B5) ▴(25B4) ▽(25BD) ▼(25BC) ▿(25BF) ▾(25BE) ∆(2206) ⊿(22BF)
+const REQUEST_RE = /^[△▲▵▴▽▼▿▾∆⊿]$/u;
+
 const MODE_SCRIPT   = { urakata: 'mode-urakata-slot.js',   jalan: 'mode-jalan-slot.js',   aj: 'mode-aj-slot.js' };
 const REDUCE_SCRIPT = { urakata: 'reduce-urakata-slot.js', jalan: 'reduce-jalan-slot.js', aj: 'reduce-aj-slot.js' };
 const WD = ['日', '月', '火', '水', '木', '金', '土'];
@@ -47,10 +57,16 @@ const WD = ['日', '月', '火', '水', '木', '金', '土'];
 function log(event, data = {}) {
   console.log(`${new Date().toISOString()} [${event}] ${JSON.stringify(data)}`);
 }
-function todayStr() {
-  const d = new Date(); d.setHours(0, 0, 0, 0);
-  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+// 予約枠の日付はすべて日本時間で考える。Actionsのランナーは UTC なので、
+// そのまま new Date() を使うと日本の朝(00:00-09:00 JST)は前日と判定され、
+// 当日の枠を「未来」として扱ってしまう。UTC+9 にずらして UTC 系メソッドで
+// 読むことで、実行環境のタイムゾーンに依存せず日本時間の暦日を得る。
+const JST_OFFSET_MS = 9 * 60 * 60 * 1000;
+function jstDate(ms = Date.now()) { return new Date(ms + JST_OFFSET_MS); }
+function jstYmd(d) {
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, '0')}-${String(d.getUTCDate()).padStart(2, '0')}`;
 }
+function todayStr() { return jstYmd(jstDate()); }
 function normTime(v) {
   const m = String(v == null ? '' : v).match(/(\d{1,2}):(\d{2})/);
   return m ? `${m[1].padStart(2, '0')}:${m[2]}` : '';
@@ -103,16 +119,20 @@ function parseDateHeader(s) {
   const mo = Number(m[1]), da = Number(m[2]);
   const wdM = t.match(/[(（]([日月火水木金土])[)）]/);
   const wd = wdM ? WD.indexOf(wdM[1]) : -1;
-  const nowY = new Date().getFullYear();
+  // 年の推定も日本時間の「今日」を基準にする（UTCだと日本の朝に前日基準となり、
+  // 年末年始やシート先頭付近で1年ずれた日付を作りうる）。
+  const nowY = jstDate().getUTCFullYear();
   const cands = [nowY, nowY + 1, nowY - 1];
   if (wd >= 0) {
-    for (const y of cands) if (new Date(y, mo - 1, da).getDay() === wd) return fmt(y, mo, da);
+    for (const y of cands) if (new Date(Date.UTC(y, mo - 1, da)).getUTCDay() === wd) return fmt(y, mo, da);
   }
-  const today = new Date(); today.setHours(0, 0, 0, 0);
-  let best = null;
-  for (const y of cands) { const d = new Date(y, mo - 1, da); if (d >= today && (!best || d < best)) best = d; }
-  const d = best || new Date(nowY, mo - 1, da);
-  return fmt(d.getFullYear(), d.getMonth() + 1, d.getDate());
+  const todayYmd = todayStr();
+  let best = '';
+  for (const y of cands) {
+    const ymd = fmt(y, mo, da);
+    if (ymd >= todayYmd && (!best || ymd < best)) best = ymd;
+  }
+  return best || fmt(nowY, mo, da);
 }
 function fmt(y, mo, da) { return `${y}-${String(mo).padStart(2, '0')}-${String(da).padStart(2, '0')}`; }
 
@@ -143,21 +163,35 @@ async function loadCapacity() {
     log('capacity_warn', { note: '日付列を認識できません（CSVでない可能性）', head: text.slice(0, 160) });
   }
   const out = [];
+  const unknown = [];
   for (let r = 1; r < rows.length; r++) {
     const row = rows[r];
     const time = normTime(row[0]);                    // A列＝時間
     if (!time) continue;
     const def = Number(String(row[1]).replace(/[^\d.-]/g, '')) || 0; // B列＝既定
     for (const dc of dateCols) {
-      const cell = String(row[dc.col] == null ? '' : row[dc.col]).trim();
+      // 異体字セレクタ等の不可視文字は落としてから判定する（✗️ のような入力対策）。
+      const cell = String(row[dc.col] == null ? '' : row[dc.col])
+        .replace(/[︀-️​-‍﻿]/g, '').trim();
       let override = '', capacity = def, explicit = false;
-      if (cell === '△' || cell === '▲') { override = 'request'; explicit = true; }
-      // ✗(U+2717) はシート凡例で使う記号。漏れると「空欄＝既定」と誤読して
-      // 受付停止のはずの枠を即予約で売ってしまうため、必ず含める。
-      else if (/^[x×✕✖✗❌XＸ]$/.test(cell)) { override = 'stop'; capacity = 0; explicit = true; }
+      if (REQUEST_RE.test(cell)) { override = 'request'; explicit = true; }
+      // 受付停止の記号。漏れると「空欄＝既定」と誤読して、閉じたはずの枠を
+      // 即予約で売ってしまう（U+2717 の漏れで実際に起きた）。
+      else if (STOP_RE.test(cell)) { override = 'stop'; capacity = 0; explicit = true; }
       else if (cell !== '' && !isNaN(Number(cell))) { capacity = Number(cell); explicit = true; }
+      else if (cell !== '') {
+        // 空欄でもないのにどの記号にも当てはまらない。既定(=販売)に倒すと
+        // 売りすぎになるため、安全側の「受付停止」に倒して必ず報告する。
+        override = 'stop'; capacity = 0; explicit = true;
+        unknown.push({ date: dc.date, time, cell,
+          codepoints: [...cell].map(c => 'U+' + c.codePointAt(0).toString(16).toUpperCase().padStart(4, '0')).join(' ') });
+      }
       out.push({ date: dc.date, time, capacity, override, explicit });
     }
+  }
+  if (unknown.length) {
+    log('capacity_cell_unrecognized', { count: unknown.length, cells: unknown.slice(0, 40) });
+    console.error(`⚠️ 定員マスターに解釈できないセルが ${unknown.length} 件あります（安全のため受付停止として扱いました）`);
   }
   return out;
 }
@@ -247,8 +281,7 @@ async function main() {
 //   期間外の枠も、日が近づいて期間内に入れば自動的に整う。
 function enforce(plan) {
   const horizonDays = parseInt(process.env.SYNC_HORIZON_DAYS || '45', 10);
-  const limitDate = new Date(Date.now() + horizonDays * 86400000)
-    .toISOString().slice(0, 10);
+  const limitDate = jstYmd(jstDate(Date.now() + horizonDays * 86400000));
   const actionable = plan.filter(p =>
     p.date <= limitDate || p.mode === 'request' || p.mode === 'closed' || p.booked > 0);
   log('enforce_scope', { total: plan.length, actionable: actionable.length, horizonDays, limitDate });

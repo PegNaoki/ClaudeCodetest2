@@ -17,6 +17,8 @@ on:
 jobs:
   reduce:
     runs-on: ubuntu-latest
+    env:
+      TZ: Asia/Tokyo   # 枠の日付は日本時間で判定する
     steps:
       - uses: actions/checkout@v5
 

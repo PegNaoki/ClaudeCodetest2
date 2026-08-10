@@ -146,12 +146,30 @@ async function readCellMode(cell) {
     if (cls) break;
     await cell.page().waitForTimeout(500);
   }
-  if (!cls) return null;
+  // 売止のセルは予約方式アイコンが消え「売止」表記だけになる。これを見て
+  // いなかったため、✗で正しく閉じている枠まで「不明」と報告していた。
+  // 判定は mode-jalan-slot.js の readCellMode と揃える。
+  if (!cls) {
+    const txt = await cell.innerText().catch(() => '');
+    if (txt.includes('売止')) return 'closed';
+    log('cell_unreadable', { text: txt.replace(/\s+/g, ' ').trim().slice(0, 160) });
+    return null;
+  }
   const s = cls.toLowerCase();
+  // 売止は icon-salestop。予約方式より先に判定する（売止セルは span.sale-stop に
+  // 元の予約方式クラスも併記されるため）。
+  if (s.includes('salestop') || s.includes('sale-stop')) return 'closed';
   if (s.includes('combination'))  return 'combination';
   if (s.includes('unconfirmed'))  return 'request';
   if (s.includes('confirmed'))    return 'immediate';
-  if (s.includes('nosale') || s.includes('none')) return 'closed';
+  // icon-close は span.no-operation 内の「開催なし」。mode 側と判定を揃える。
+  if (s.includes('close') || s.includes('nosale') || s.includes('none')) return 'closed';
+  // アイコンはあるが既知クラスに一致しない。判定材料を残す。
+  const dump = await cell.evaluate(el => ({
+    text: (el.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 160),
+    icons: [...el.querySelectorAll('[class*="icon"]')].map(n => n.className).slice(0, 10),
+  })).catch(() => null);
+  log('cell_class_unknown', { cls, ...(dump || {}) });
   return null;
 }
 

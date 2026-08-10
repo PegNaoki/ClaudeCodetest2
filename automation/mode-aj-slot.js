@@ -161,25 +161,50 @@ async function switchOneSlot(page, task) {
   const { date, time, mode, stock, compact } = task;
   await ensureMonthShown(page, compact);
 
-  const ids = await page.evaluate((t) => {
-    const rows = [...document.querySelectorAll('tr.plan-stock')];
-    for (const row of rows) {
+  // 同じ時間の行が複数プラン分ある（旧プランは売止で在庫を持たない）。
+  // 先頭行を決め打ちすると、対象月の在庫を持たない旧プランを掴んで
+  // status が読めず「不明(null)」になる。対象日の status が実在する行を選ぶ。
+  const cands = await page.evaluate((t) => {
+    const out = [];
+    for (const row of document.querySelectorAll('tr.plan-stock')) {
       const el = row.querySelector('.plan-time span');
       if (el && (el.textContent || '').trim() === t) {
-        return { plan: (row.querySelector('.plan_id') || {}).textContent?.trim() || '',
-                 course: (row.querySelector('.plan_course_id') || {}).textContent?.trim() || '' };
+        out.push({ plan: (row.querySelector('.plan_id') || {}).textContent?.trim() || '',
+                   course: (row.querySelector('.plan_course_id') || {}).textContent?.trim() || '' });
       }
     }
-    return null;
+    return out;
   }, time);
-  if (!ids) throw new SlotSyncError(`時間 ${time} の行が見つかりません`);
+  if (!cands.length) throw new SlotSyncError(`時間 ${time} の行が見つかりません`);
 
-  const statusId = `${ids.plan}_${ids.course}_${compact}_status`;
-  const beforeStatus = await readStatus(page, statusId);
+  let ids = null, statusId = '', beforeStatus = null;
+  for (const c of cands) {
+    const sid = `${c.plan}_${c.course}_${compact}_status`;
+    const v = await readStatus(page, sid);
+    if (v !== null) { ids = c; statusId = sid; beforeStatus = v; break; }
+  }
+  if (!ids) {
+    // 全候補で status が読めない＝その日にこのプランの枠が無い（未開設など）。
+    // 書き込みに進んでも失敗するだけなので、明示的にスキップして次の枠へ。
+    log('slot_skip', { date, time, mode,
+      message: `対象日の枠が見つかりません（候補${cands.length}件すべて status 無し。AJ側で枠が未開設の可能性）`,
+      candidates: cands.map(c => `${c.plan}_${c.course}`) });
+    return { result: 'skipped', message: '対象日の枠が未開設（status無し）' };
+  }
   const targetStatus = { request: 3, closed: 4, immediate: 1 }[mode];
   log('slot_before', { date, time, mode, statusId, beforeStatus, meaning: statusMeaning(beforeStatus) });
 
-  if (beforeStatus === targetStatus) {
+  // 予約方式が一致していても、在庫が目標とズレていれば直す必要がある。
+  // 以前はここで打ち切っていたため、定員を上げても既に即予約だった枠は
+  // 古い在庫のまま取り残されていた（チャネル間で残数がズレる原因）。
+  let stockOk = true;
+  if (mode === 'immediate') {
+    const cur = await readStatusVal(page, statusId.replace(/_status$/, '_val'));
+    const want = Math.max(0, Number(stock) || 0);
+    stockOk = (cur === null) ? true : (cur === want);
+    if (!stockOk) log('stock_mismatch', { date, time, current: cur, target: want });
+  }
+  if (beforeStatus === targetStatus && stockOk) {
     log('slot_already', { date, time, note: `既に${statusMeaning(targetStatus)}` });
     return { result: 'already' };
   }
@@ -250,34 +275,42 @@ async function openCalendarMenu(page) {
   throw new SlotSyncError('カレンダー管理・在庫管理メニューを開けませんでした');
 }
 
+// 対象月を表示する。reduce-aj-slot.js の実装（textScan方式）と揃える。
+// getByRole の accessible name では遠い月の月ボタンを拾えず、「次月」送りも
+// AJ の画面には該当要素が無いため、9月以降へ移動できず全枠スキップになっていた。
 async function ensureMonthShown(page, compact) {
-  if (await page.locator(`.day_${compact}`).count() > 0) return;
-  const year = Number(compact.slice(0, 4)), month = Number(compact.slice(4, 6));
-  const monthRe = new RegExp(`${year}\\s*年\\s*${month}\\s*月`);
+  if (await page.locator(`.day_${compact}`).count() > 0) { log('month_ok', { compact, nav: 0 }); return; }
 
-  // まず対象月ボタンが直接あれば押す
-  const monthBtn = page.getByRole('button', { name: monthRe }).first();
-  if (await monthBtn.count() > 0) {
-    await monthBtn.click(); await page.waitForTimeout(1200); await page.waitForLoadState('networkidle').catch(() => {});
-    if (await page.locator(`.day_${compact}`).count() > 0) return;
-  }
+  const year  = Number(compact.slice(0, 4));
+  const month = Number(compact.slice(4, 6));
 
-  // 直接ボタンが無ければ「次月」送りを繰り返して対象月まで進める（best-effort）
-  for (let i = 0; i < 8; i++) {
-    const next = page.locator(
-      'a[aria-label*="次"], button[aria-label*="次"], .fc-next-button, a:has-text("次の月"), button:has-text("次の月"), a:has-text("›"), button:has-text("›")'
-    ).first();
-    if (await next.count() === 0) break;
-    await next.click({ force: true }).catch(() => {});
-    await page.waitForTimeout(1000); await page.waitForLoadState('networkidle').catch(() => {});
-    if (await page.locator(`.day_${compact}`).count() > 0) return;
-    const mb = page.getByRole('button', { name: monthRe }).first();
-    if (await mb.count() > 0) {
-      await mb.click(); await page.waitForTimeout(1000); await page.waitForLoadState('networkidle').catch(() => {});
-      if (await page.locator(`.day_${compact}`).count() > 0) return;
+  // 「YYYY年M月」ボタンをテキスト内容で走査してクリックする。
+  // 描画のAJAX遅延に備え waitForSelector で待ち、数回リトライする。
+  for (let attempt = 1; attempt <= 4; attempt++) {
+    const clicked = await page.evaluate(({ year, month }) => {
+      const want = `${year}年${month}月`;
+      const els = [...document.querySelectorAll('button, a, [role="button"]')];
+      const el = els.find(e => (e.textContent || '').replace(/\s+/g, '') === want);
+      if (el) { el.click(); return true; }
+      return false;
+    }, { year, month });
+    if (clicked) {
+      try {
+        await page.waitForSelector(`.day_${compact}`, { timeout: 6000 });
+        log('month_ok', { compact, via: 'textScan', attempt });
+        return;
+      } catch { /* 未描画。次のリトライへ */ }
     }
+    await page.waitForTimeout(600);
+    await page.waitForLoadState('networkidle').catch(() => {});
   }
-  throw new SlotSyncError(`対象月に移動できません（${compact}）`);
+
+  // 見つからない場合は候補をログに出して停止（手掛かり用）
+  const buttons = await page.$$eval('button', els => els.map(e => (e.textContent || '').replace(/\s+/g, '').trim()).filter(t => /\d{4}年\d{1,2}月/.test(t)).slice(0, 20)).catch(() => []);
+  const months = await page.$$eval('[class*="_day"]', els => {
+    const s = new Set(); els.forEach(e => { const m = (e.className.match(/(\d{4}-\d{2})_day/) || [])[1]; if (m) s.add(m); }); return [...s];
+  }).catch(() => []);
+  throw new SlotSyncError(`対象月に移動できません（${compact}）。月ボタン候補: ${JSON.stringify(buttons)} / 表示中: ${JSON.stringify(months)}`);
 }
 
 // ボタンを「表示テキストの完全一致」で押す。getByRole の accessible name は
@@ -310,6 +343,14 @@ async function clickButtonByText(page, label) {
     throw new SlotSyncError(`ボタン「${label}」が見つかりません`);
   }
   log('button_clicked', { label, tag: res.tag, cls: res.cls });
+}
+
+// 在庫（残り即予約可能数）の hidden input を読む。読めなければ null。
+async function readStatusVal(page, valId) {
+  const v = await page.locator(`input[id="${valId}"]`).inputValue().catch(() => null);
+  if (v === null || v === '') return null;
+  const n = parseInt(v, 10);
+  return Number.isNaN(n) ? null : n;
 }
 
 async function readStatus(page, statusId) {

@@ -20,6 +20,7 @@ jobs:
   audit:
     runs-on: ubuntu-latest
     env:
+      TZ: Asia/Tokyo   # 枠の日付は日本時間で判定する
       # 既定の監査対象枠（inputs.slots が空のとき使用）
       DEFAULT_SLOTS: >-
         [{"date":"2026-07-30","time":"10:00"},

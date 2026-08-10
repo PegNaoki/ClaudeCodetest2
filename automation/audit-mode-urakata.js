@@ -42,7 +42,11 @@ function normalizeYmd(d) {
   return `${m[1]}-${m[2].padStart(2, '0')}-${m[3].padStart(2, '0')}`;
 }
 // 即時販売在庫の数字 → 共通モード語彙
-function limitToMode(n) {
+// 販売状態(◯/✕)は在庫数とは別軸。売止(✕)なら在庫数に関係なく closed。
+// これを見ていなかったため、売止だが在庫数が残っている枠を「即予約」と
+// 誤報告していた（8/16 10:00 を「即予約/2」と誤表示した原因）。
+function limitToMode(n, open) {
+  if (open === false) return 'closed';
   if (n === null) return 'unknown';
   return n > 0 ? 'immediate' : 'request';
 }
@@ -97,7 +101,7 @@ async function main() {
         const r = await auditOneSlot(page, t);
         const row = {
           site: 'urakata', date: t.date, time: t.time,
-          mode: limitToMode(r.limit), raw: r.limit,
+          mode: limitToMode(r.limit, r.open), raw: r.limit, open: r.open,
           remainImmediate: r.limit, booked: r.booked, capacity: r.capacity,
         };
         results.push(row);
@@ -131,7 +135,8 @@ async function auditOneSlot(page, task) {
   const cell = page.locator('[data-urkt-target="1"]');
   const limit = await readLimit(cell);   // 残り即予約可能数（即時販売在庫 ( n )）
   const seat = await readSeat(cell);      // { booked, capacity }（予約数/定員）
-  return { limit, booked: seat.booked, capacity: seat.capacity };
+  const open = await readOpen(cell);      // 販売状態 ◯=true / ✕=false（別軸）
+  return { limit, open, booked: seat.booked, capacity: seat.capacity };
 }
 
 // ---- 以下 mode-urakata-slot.js から流用（ナビゲーション・読み取り・ログイン） ----
@@ -189,6 +194,16 @@ async function locateCell(page, date, time) {
     rowCells[colIdx].setAttribute('data-urkt-target', '1');
     return { ok: true, rowIdx, colIdx, header: `${dd}(${youbi})` };
   }, { dateStr: date, time: time, course: CONFIG.course });
+}
+
+// 販売状態（◯=販売中 / ✕=売止）。mode-urakata-slot.js と同じ読み方。
+async function readOpen(cell) {
+  const t = await cell.locator('[data-test=calendarOpen]').first().innerText().catch(() => null);
+  if (t === null) return null;
+  const s = t.trim();
+  if (/[◯○◎]/.test(s)) return true;
+  if (/[✕✖×]/.test(s)) return false;
+  return null;
 }
 
 async function readLimit(cell) {

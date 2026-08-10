@@ -214,7 +214,17 @@ async function switchOneSlot(mng, task) {
     return { result: 'dumped' };
   }
 
-  if (beforeMode === mode) {
+  // 予約方式が一致していても、在庫（残数）が目標とズレていれば直す必要がある。
+  // 以前はここで打ち切っていたため、定員を14に上げても既に即予約だった枠は
+  // 6のまま取り残されていた（ウラカタだけ14でチャネル間がズレる原因）。
+  let stockOk = true;
+  if (mode === 'immediate' || mode === 'combination') {
+    const cur = await readStock(cell);
+    const want = Math.max(1, Number(stock) || 0);
+    stockOk = (cur === null) ? true : (cur === want);
+    if (!stockOk) log('stock_mismatch', { date, time, current: cur, target: want });
+  }
+  if (beforeMode === mode && stockOk) {
     log('slot_already', { date, time, note: `既に${modeMeaning(mode)}` });
     return { result: 'already' };
   }
@@ -246,24 +256,54 @@ async function switchOneSlot(mng, task) {
     await sel.selectOption(targetRt);
   }
 
-  // 併用は「受付制限を変更する＋定員の数値」も必要
-  if (mode === 'combination') {
+  // 併用・即時は「受付制限を変更する＋定員の数値」も必要。
+  // リクエスト予約の枠は定員を持たないため、定員を与えずに即時へ変えても
+  // じゃらん側が受け付けずリクエストのまま戻る（request→immediate が全滅していた原因）。
+  // 併用・売止からの即時化が通っていたのは、その枠が既に定員を持っていたから。
+  if (mode === 'combination' || mode === 'immediate') {
     const limitSel = mng.locator('select').filter({ has: mng.getByRole('option', { name: '変更する', exact: true }) }).first();
     await limitSel.selectOption('1');
     await mng.waitForTimeout(400);
     const numInput = mng.locator('input.js-panel-textBox-input').first();
     await numInput.waitFor({ state: 'visible', timeout: 8000 });
-    await numInput.fill(String(stock));
+    // 即時で定員0を書くと売れない枠になる。在庫は必ず1以上にする。
+    const n = Math.max(1, Number(stock) || 0);
+    await numInput.fill(String(n));
+    log('limit_set', { date, time, mode, stock: n });
   }
 
   await mng.getByRole('button', { name: '一括変更する' }).click();
   await mng.waitForLoadState('networkidle').catch(() => {});
   await mng.waitForTimeout(1500);
 
+  // 保存が黙って弾かれても分かるよう、画面のエラー表示を拾っておく。
+  // （これが無かったため「検証NG」としか分からず原因究明に時間がかかった）
+  const errText = await mng.evaluate(() => {
+    const sels = ['.error', '.errorMessage', '.error-message', '[class*="error"]', '.alert'];
+    const seen = new Set();
+    for (const s of sels) {
+      for (const el of document.querySelectorAll(s)) {
+        if (!el.offsetParent) continue;
+        const t = (el.innerText || '').replace(/\s+/g, ' ').trim();
+        if (t && t.length < 300) seen.add(t);
+      }
+    }
+    return [...seen].slice(0, 5);
+  }).catch(() => []);
+  if (errText.length) log('panel_error', { date, time, mode, errors: errText });
+
   // 3. カレンダーをリロードして、セルのアイコンで検証
-  await backToCalendar(mng);
-  cell = await getCell(mng, date, time);
-  const afterMode = await readCellMode(cell);
+  // 保存直後は再描画が間に合わずアイコンを読めない（null）ことがある。
+  // null は「切替失敗」ではなく「読めていない」なので、読み直してから判定する。
+  let afterMode = null;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    await backToCalendar(mng);
+    cell = await getCell(mng, date, time);
+    afterMode = await readCellMode(cell);
+    if (afterMode !== null) break;
+    log('verify_retry', { date, time, attempt, note: 'セルの状態を読めず再取得' });
+    await mng.waitForTimeout(1500);
+  }
   if (afterMode !== mode) {
     throw new SlotSyncError(`切替検証NG：想定(${mode})だが実際は(${afterMode})`);
   }
@@ -298,6 +338,14 @@ async function readCellMode(cell) {
   // 売止のセルは予約方式アイコンが消え「売止」表記だけになる。
   // アイコンが取れない＝判定不能ではなく、まず売止かどうかを本文で確かめる。
   if (!cls) {
+    // null を返す前にセルの実DOMを残す。null の原因（描画待ちなのか、
+    // 想定外のマークアップなのか）がログだけでは切り分けられなかったため。
+    const dump = await cell.evaluate(el => ({
+      html: (el.outerHTML || '').slice(0, 1500),
+      text: (el.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 200),
+      icons: [...el.querySelectorAll('[class*="icon"]')].map(n => n.className).slice(0, 10),
+    })).catch(() => null);
+    log('cell_unreadable', dump || { note: 'セルのDOMも取得できず' });
     const txt = await cell.innerText().catch(() => '');
     if (txt.includes('売止')) return 'closed';
     return null;
@@ -309,8 +357,28 @@ async function readCellMode(cell) {
   if (s.includes('combination'))  return 'combination';
   if (s.includes('unconfirmed'))  return 'request';   // ※ 'confirmed' 判定より前に
   if (s.includes('confirmed'))    return 'immediate';
-  if (s.includes('nosale') || s.includes('none')) return 'closed';
+  // icon-close は span.no-operation 内に出る「開催なし」。売止と同じく
+  // 新規予約が入らない状態なので closed 扱いにする。これが無かったため
+  // 全枠が判定不能になり、じゃらんへの反映が丸ごとスキップされていた。
+  if (s.includes('close') || s.includes('nosale') || s.includes('none')) return 'closed';
+  // アイコンは取れているのに既知のクラスに当てはまらない。ここが実際に
+  // null を返している経路なので、判定材料をそのまま残す（8/3・8/10 の 10:00
+  // が「現在モードを読めずスキップ」になっていた原因の切り分け用）。
+  const dump = await cell.evaluate(el => ({
+    text: (el.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 200),
+    icons: [...el.querySelectorAll('[class*="icon"]')].map(n => n.className).slice(0, 10),
+    html: (el.outerHTML || '').slice(0, 1200),
+  })).catch(() => null);
+  log('cell_class_unknown', { cls, ...(dump || {}) });
   return null;
+}
+
+// セルの残数 .stock-cnt を読む（audit-mode-jalan.js と同じ）
+async function readStock(cell) {
+  const txt = await cell.locator('.stock-cnt').first().innerText().catch(() => null);
+  if (txt === null) return null;
+  const n = parseInt(txt.replace(/[^\d]/g, ''), 10);
+  return Number.isNaN(n) ? null : n;
 }
 
 // 編集パネルからカレンダーに戻る（リロードで確実に一覧へ）

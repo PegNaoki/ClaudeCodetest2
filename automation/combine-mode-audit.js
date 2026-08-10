@@ -24,7 +24,7 @@ const MODE_JA = {
   immediate:   '即予約',
   request:     'リクエスト',
   combination: '併用',
-  closed:      '開催なし',
+  closed:      '売止/満席',
   not_found:   '—',
   unknown:     '不明',
 };
