@@ -11,9 +11,9 @@ on:
   workflow_dispatch:
     inputs:
       enforce:
-        description: "true=在庫同期を本番反映（各OTAをリクエスト化/即予約化）。既定はDRY_RUN"
+        description: "false=反映せずプラン表示のみ（DRY_RUN）。既定は本番反映"
         required: false
-        default: "false"
+        default: "true"
       enforce_stock:
         description: "true=在庫の絶対値セットも実行（既定はモードのみ）"
         required: false
@@ -143,15 +143,18 @@ jobs:
           fi
 
       # 在庫同期プラン（ライブ予約=確定のみでB算出、定員マスターCSVでC）。
-      # 既定は DRY_RUN=true で無操作のプラン表を出すだけ（危険枠の可視化）。
-      # 通常（スケジュール）は DRY_RUN。手動実行で inputs.enforce=true のときだけ本番反映。
+      # スケジュール実行でも本番反映する。以前は inputs.enforce=true の手動実行
+      # だけが反映対象で、スケジュールは常に DRY_RUN だったため、シートを更新しても
+      # 自動では各OTAに反映されず「回っていない」状態になっていた。
+      # 反映せず確認だけしたいときは、手動実行で enforce=false を選ぶ。
+      # 予約データが欠けたときは sync-overbooking.js 側が反映を中止する（売りすぎ防止）。
       - name: Overbooking sync (plan/enforce)
         if: always()
         continue-on-error: true   # 同期の失敗でReconcile本体を落とさない（誤アラート防止）
         working-directory: automation
         env:
           CAPACITY_CSV_URL: ${{ secrets.CAPACITY_CSV_URL }}
-          DRY_RUN: ${{ github.event.inputs.enforce == 'true' && 'false' || 'true' }}
+          DRY_RUN: ${{ github.event.inputs.enforce == 'false' && 'true' || 'false' }}
           ENFORCE_STOCK: ${{ github.event.inputs.enforce_stock || 'false' }}
           # enforce時は各OTAへログインするため認証情報を渡す
           JALAN_ID:       ${{ secrets.JALAN_ID }}
