@@ -172,6 +172,25 @@ jobs:
           echo "DRY_RUN=$DRY_RUN ENFORCE_STOCK=$ENFORCE_STOCK"
           node sync-overbooking.js
 
+      # Googleカレンダー同期（OTA実データを正とする）。
+      # 従来は GAS の registerApprovedToCalendar がシートを見て登録していたため、
+      # シートへの転記が漏れた予約はカレンダーに載らなかった。ここでは各OTAから
+      # 読んだ *-reservations.json を直接の入力にする。
+      # GCAL_ID / GCAL_SA_KEY 未設定のときは何もせずスキップする。
+      - name: Sync Google Calendar
+        if: always()
+        continue-on-error: true   # カレンダー同期の失敗でReconcile本体を落とさない
+        working-directory: automation
+        env:
+          GCAL_ID:     ${{ secrets.GCAL_ID }}
+          GCAL_SA_KEY: ${{ secrets.GCAL_SA_KEY }}
+          CAL_DRY_RUN: ${{ github.event.inputs.enforce == 'false' && 'true' || 'false' }}
+        run: |
+          if [ -z "$GCAL_ID" ] || [ -z "$GCAL_SA_KEY" ]; then
+            echo "GCAL_ID / GCAL_SA_KEY 未設定のためカレンダー同期をスキップ"; exit 0
+          fi
+          node calendar-sync.js
+
       - name: Upload artifacts
         if: always()
         uses: actions/upload-artifact@v5
