@@ -117,11 +117,44 @@ function loadReservations() {
       const name = String(r.name || '').trim();
       // 予約番号が無いサイトは 日付|時刻|氏名 で代用する
       const key = no ? `${site}|${no}` : `${site}|${date}|${time}|${name}`;
-      out.set(key, { key, site, no, name, date, time,
-                     people: r.people || '', plan: r.plan || '', price: r.price || '', phone: r.phone || '' });
+      out.set(key, { key, site, no, name, date, time, route: routeOf(site, r),
+                     people: r.people || '', plan: r.plan || r.course || '',
+                     price: r.price || '', phone: r.phone || '', media: r.media || '',
+                     applied: r.applied || '', raw: r });
     }
   }
   return { wanted: out, missing };
+}
+
+// タイトルの②予約経路。ウラカタは共通在庫なので、実際の販売元(media)で
+// 「ウラカタ(自社Web予約)」と「アソビュー」を区別する。
+function routeOf(site, r) {
+  const media = String(r.media || '');
+  if (site.includes('じゃらん')) return 'じゃらん';
+  if (site.includes('アクティビティ')) return 'AJ';
+  if (site.includes('ウラカタ') || site.includes('アソビュー')) {
+    if (media.includes('アソビュー')) return 'アソビュー';
+    return 'ウラカタ';
+  }
+  return site || '紹介';
+}
+
+// 金額表記から数値だけ取り出す（"12,000円" "¥12000" などを 12000 に）
+function priceNum(v) {
+  const n = String(v == null ? '' : v).replace(/[^\d]/g, '');
+  return n ? Number(n) : null;
+}
+
+// タイトル： ①【②】③様④名│⑤円
+//   ① アクティビティ種別（SUP = S）
+//   ② 予約経路 / ③ 名前 / ④ 人数 / ⑤ 支払金額
+function buildTitle(r) {
+  const yen = priceNum(r.price);
+  const parts = [
+    `S【${r.route}】${r.name || '名前不明'}様`,
+    r.people ? `${r.people}名` : '',
+  ].join('');
+  return yen === null ? parts : `${parts}│${yen.toLocaleString('ja-JP')}円`;
 }
 
 function buildEvent(r) {
@@ -130,19 +163,35 @@ function buildEvent(r) {
   const e = new Date(endMs + JST_OFFSET_MS);
   const end = `${e.getUTCFullYear()}-${String(e.getUTCMonth() + 1).padStart(2, '0')}-${String(e.getUTCDate()).padStart(2, '0')}`
             + `T${String(e.getUTCHours()).padStart(2, '0')}:${String(e.getUTCMinutes()).padStart(2, '0')}:00${JST_SUFFIX}`;
+  // 詳細欄：取得できている項目は漏らさず載せる。既知の項目を整えて並べたあと、
+  // まだ整形先が無い項目も「その他」として出す（サイト側の項目追加を取りこぼさない）。
+  const known = new Set(['bookingNo', 'status', 'date', 'time', 'people', 'name',
+                         'plan', 'course', 'price', 'phone', 'media', 'applied']);
+  const extra = Object.entries(r.raw || {})
+    .filter(([k, v]) => !known.has(k) && v !== '' && v != null)
+    .map(([k, v]) => `${k}: ${typeof v === 'object' ? JSON.stringify(v) : v}`);
+
   const lines = [
-    `予約サイト: ${r.site}`,
-    r.no    ? `予約番号: ${r.no}` : '',
-    r.name  ? `お名前: ${r.name}` : '',
+    `■ 予約内容`,
+    `予約経路: ${r.route}${r.media && r.media !== r.route ? `（${r.media}）` : ''}`,
+    r.no     ? `予約番号: ${r.no}` : '',
+    `日時: ${r.date} ${r.time}〜`,
     r.people ? `人数: ${r.people}名` : '',
-    r.plan  ? `プラン: ${r.plan}` : '',
-    r.price ? `金額: ${r.price}` : '',
-    r.phone ? `電話: ${r.phone}` : '',
+    r.plan   ? `プラン: ${r.plan}` : '',
+    r.price  ? `金額: ${r.price}` : '',
     '',
-    '※このイベントは各OTAの予約データから自動生成されています。',
-  ].filter(Boolean);
+    `■ お客様情報`,
+    r.name   ? `お名前: ${r.name}` : '',
+    r.phone  ? `電話: ${r.phone}` : '',
+    r.applied ? `申込日: ${r.applied}` : '',
+    extra.length ? '' : '',
+    ...(extra.length ? ['■ その他', ...extra] : []),
+    '',
+    `※各OTAの予約データから自動生成（${r.site}）`,
+  ].filter(l => l !== '' || true).filter(Boolean);
+
   return {
-    summary: `SUP ${r.people ? r.people + '名 ' : ''}${r.name || ''}（${r.site}）`.trim(),
+    summary: buildTitle(r),
     description: lines.join('\n'),
     start: { dateTime: start, timeZone: 'Asia/Tokyo' },
     end:   { dateTime: end,   timeZone: 'Asia/Tokyo' },
