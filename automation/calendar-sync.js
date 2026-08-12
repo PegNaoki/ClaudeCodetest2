@@ -24,8 +24,10 @@ import fs from 'fs';
 import crypto from 'crypto';
 
 const CONFIG = {
-  calendarId: process.env.GCAL_ID || '',
-  saKeyRaw:   process.env.GCAL_SA_KEY || '',
+  // シークレットは貼り付け時に末尾の改行が混入しやすい。カレンダーIDに改行が
+  // 残ると URL が .../calendars/xxx%0A/events となり 404 になるため、必ず除去する。
+  calendarId: (process.env.GCAL_ID || '').trim(),
+  saKeyRaw:   (process.env.GCAL_SA_KEY || '').trim(),
   resFiles:  (process.env.RES_FILES || 'jalan-reservations.json,urakata-reservations.json,aj-reservations.json')
     .split(',').map(s => s.trim()).filter(Boolean),
   eventHours: Number(process.env.EVENT_HOURS || 2),
