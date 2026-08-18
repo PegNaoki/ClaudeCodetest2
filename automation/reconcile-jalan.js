@@ -24,6 +24,7 @@
 
 import { chromium } from 'playwright';
 import fs from 'fs';
+import { normalize, splitKana, splitPrice, findPhone } from './reservation-schema.js';
 
 const CONFIG = {
   topUrl:   'https://activityboard.jp/',
@@ -172,27 +173,45 @@ async function main() {
         const tds  = tr.querySelectorAll('td');
         const plan  = tds.length > 5 ? tds[5].textContent.trim() : '';
         const price = tds.length > 6 ? tds[6].textContent.trim().split('\n')[0] : '';
+        // 申込日時は [2]、氏名+フリガナは [4]。列構成は DUMP_ROW で実DOMを確認済み。
+        const applied  = tds.length > 2 ? tds[2].textContent.replace(/\s+/g, ' ').trim() : '';
+        const nameCell = tds.length > 4 ? tds[4].textContent.replace(/\s+/g, ' ').trim() : '';
+        const route    = tds.length > 1 ? tds[1].textContent.replace(/\s+/g, ' ').trim() : '';
         // 診断（DUMP_ROW=true）：一覧行の全セルを出して、取得できる項目を確認する。
         const cells = [...tds].map((td, i) =>
           `[${i}] ${td.textContent.replace(/\s+/g, ' ').trim().slice(0, 80)}`);
-        return { bookingNo, expText, people, name: name.trim().replace(/\s+/g, ' '), status, plan, price, _cells: cells };
+        return { bookingNo, expText, people, name: name.trim().replace(/\s+/g, ' '), status,
+                 plan, price, applied, nameCell, route, _cells: cells };
       }));
 
       if (process.env.DUMP_ROW === 'true') {
         for (const r of rows.slice(0, 3)) log('dump_row', { name: r.name, cells: r._cells });
       }
       for (const r of rows) {
+        const cells = r._cells || [];
         delete r._cells;
         const { date, time } = parseExperience(r.expText);
-        all.push({
+        // 氏名セルにフリガナが同居している（例「山根 綾菜(ヤマネ アヤナ)」）ので分解する。
+        const { name: nm, kana } = splitKana(r.nameCell);
+        // 金額セルは「15,200円オンラインカード決済」のように決済方法が続く。
+        const { price, payment } = splitPrice(r.price);
+        // 電話番号はじゃらんの一覧に列が無い。行内に現れていれば拾い、無ければ null。
+        all.push(normalize({
+          site: 'じゃらん',
           bookingNo: r.bookingNo,
           status:    r.status,
           date, time,
-          people:    parseInt(r.people, 10) || null,
-          name:      r.name,
+          people:    r.people,
+          name:      nm || r.name,
+          kana,
+          phone:     findPhone(cells),
           plan:      r.plan,
-          price:     r.price,
-        });
+          price,
+          payment,
+          media:     'じゃらん',
+          applied:   r.applied,
+          note:      r.route,
+        }));
       }
       log('page_read', { page: p + 1, rows: rows.length, total: all.length });
 

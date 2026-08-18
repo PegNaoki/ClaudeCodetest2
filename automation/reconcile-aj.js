@@ -16,6 +16,7 @@
 
 import { chromium } from 'playwright';
 import fs from 'fs';
+import { normalize, splitKana, splitPrice, findPhone, clean } from './reservation-schema.js';
 
 const CONFIG = {
   loginUrl: 'https://ptn.activityjapan.com/login',
@@ -147,7 +148,9 @@ async function main() {
       if (process.env.DUMP_ROW === 'true') {
         for (const r of rows.slice(0, 3)) log('dump_row', { name: r.name, detailUrl: r._detailUrl, cells: r._cells });
       }
-      rows.forEach(r => { delete r._cells; delete r._detailUrl; all.push(r); });
+      // 列位置が未確認のサイトなので、セル一覧をそのまま持ち回って後段で
+      // 正規表現により項目を拾う（推測のセレクタ固定は取りこぼしの原因になる）。
+      rows.forEach(r => all.push(r));
       log('page_read', { page: p + 1, rows: rows.length, total: all.length });
 
       // 次ページ（ページネーションの「次」）
@@ -189,7 +192,31 @@ async function main() {
       let status = '確定';
       if (r.status.includes('キャンセル')) status = 'キャンセル';
       else if (r.status.includes('リクエスト')) status = '仮予約';
-      return { bookingNo: r.bookingNo, status, date, time, name: r.name, people: parseInt(r.people, 10) || null };
+      // AJは列構成が未確定なため、セル本文から正規表現で項目を拾う。
+      const cells = (r._cells || []).map((c) => String(c).replace(/^\[\d+\]\s*/, ''));
+      // 金額：「12,000円」等を含むセル。実施日セルの数字と混同しないよう「円」を必須にする。
+      const priceCell = cells.find((c) => /[\d,]+\s*円/.test(c)) || '';
+      const { price, payment } = splitPrice((priceCell.match(/[\d,]+\s*円.*/) || [''])[0]);
+      // 申込日：実施日セル以外に現れる日付。実施日は既に perform で取得済み。
+      const appliedCell = cells.find((c) => /\d{4}[-/]\d{1,2}[-/]\d{1,2}/.test(c) && c !== r.perform && !/実施日/.test(c)) || '';
+      // プラン名：日付・金額・人数・氏名のどれでもない、最も長い文章セルをプラン名とみなす。
+      const planCell = cells
+        .filter((c) => c.length > 8 && !/[\d,]+\s*円/.test(c) && !/\d{4}[-/]\d{1,2}[-/]\d{1,2}/.test(c) && !c.includes(r.name))
+        .sort((a, b) => b.length - a.length)[0] || '';
+      const { name: nm, kana } = splitKana(r.name);
+      return normalize({
+        site: 'アクティビティジャパン',
+        bookingNo: r.bookingNo,
+        status, date, time,
+        people: r.people,
+        name: nm, kana,
+        phone: findPhone(cells),
+        plan: planCell,
+        price, payment,
+        media: 'アクティビティジャパン',
+        applied: (appliedCell.match(/\d{4}[-/]\d{1,2}[-/]\d{1,2}[^\d]*(\d{1,2}:\d{2})?/) || [appliedCell])[0],
+        note: clean(r._detailUrl),
+      });
     }).filter((r) => r.date && (RECON_FROM ? (r.date >= RECON_FROM && r.date <= RECON_TO) : r.date >= todayStr));
 
     const result = {

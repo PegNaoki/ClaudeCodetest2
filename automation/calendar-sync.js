@@ -120,7 +120,8 @@ function loadReservations() {
       out.set(key, { key, site, no, name, date, time, route: routeOf(site, r),
                      people: r.people || '', plan: r.plan || r.course || '',
                      price: r.price || '', phone: r.phone || '', media: r.media || '',
-                     applied: r.applied || '', raw: r });
+                     applied: r.applied || '', kana: r.kana || '',
+                     payment: r.payment || '', status: r.status || '', raw: r });
     }
   }
   return { wanted: out, missing };
@@ -165,30 +166,36 @@ function buildEvent(r) {
             + `T${String(e.getUTCHours()).padStart(2, '0')}:${String(e.getUTCMinutes()).padStart(2, '0')}:00${JST_SUFFIX}`;
   // 詳細欄：取得できている項目は漏らさず載せる。既知の項目を整えて並べたあと、
   // まだ整形先が無い項目も「その他」として出す（サイト側の項目追加を取りこぼさない）。
-  const known = new Set(['bookingNo', 'status', 'date', 'time', 'people', 'name',
-                         'plan', 'course', 'price', 'phone', 'media', 'applied']);
+  const known = new Set(['site', 'bookingNo', 'status', 'date', 'time', 'people', 'name',
+                         'kana', 'plan', 'course', 'price', 'payment', 'phone',
+                         'media', 'applied', 'note']);
   const extra = Object.entries(r.raw || {})
     .filter(([k, v]) => !known.has(k) && v !== '' && v != null)
     .map(([k, v]) => `${k}: ${typeof v === 'object' ? JSON.stringify(v) : v}`);
 
+  // 予約ごとに項目数が変わると見比べにくいので、全サイト共通の項目を必ず同じ順で
+  // 並べる。そのサイトが出していない項目は空欄にせず「（取得不可）」と明示する。
+  const v = (x) => (x === '' || x == null ? '（取得不可）' : String(x));
   const lines = [
-    `■ 予約内容`,
-    `予約経路: ${r.route}${r.media && r.media !== r.route ? `（${r.media}）` : ''}`,
-    r.no     ? `予約番号: ${r.no}` : '',
+    '■ 予約内容',
+    `予約経路: ${v(r.route)}${r.media && r.media !== r.route ? `（${r.media}）` : ''}`,
+    `予約番号: ${v(r.no)}`,
+    `ステータス: ${v(r.status)}`,
     `日時: ${r.date} ${r.time}〜`,
-    r.people ? `人数: ${r.people}名` : '',
-    r.plan   ? `プラン: ${r.plan}` : '',
-    r.price  ? `金額: ${r.price}` : '',
+    `人数: ${r.people ? `${r.people}名` : '（取得不可）'}`,
+    `プラン: ${v(r.plan)}`,
+    `金額: ${v(r.price)}`,
+    `決済方法: ${v(r.payment)}`,
     '',
-    `■ お客様情報`,
-    r.name   ? `お名前: ${r.name}` : '',
-    r.phone  ? `電話: ${r.phone}` : '',
-    r.applied ? `申込日: ${r.applied}` : '',
-    extra.length ? '' : '',
-    ...(extra.length ? ['■ その他', ...extra] : []),
+    '■ お客様情報',
+    `お名前: ${v(r.name)}`,
+    `フリガナ: ${v(r.kana)}`,
+    `電話: ${v(r.phone)}`,
+    `申込日: ${v(r.applied)}`,
+    ...(extra.length ? ['', '■ その他', ...extra] : []),
     '',
     `※各OTAの予約データから自動生成（${r.site}）`,
-  ].filter(l => l !== '' || true).filter(Boolean);
+  ];
 
   return {
     summary: buildTitle(r),

@@ -21,6 +21,7 @@
 
 import { chromium } from 'playwright';
 import fs from 'fs';
+import { normalize, splitKana, splitPrice } from './reservation-schema.js';
 
 const CONFIG = {
   loginUrl: 'https://the-retreat-place.urkt.in/login',
@@ -117,13 +118,24 @@ async function main() {
     const reservations = rows.map((r, idx) => {
       const m = String(r.joinDate).match(/(\d{4})\/(\d{1,2})\/(\d{1,2})/);
       const date = m ? `${m[1]}-${m[2].padStart(2,'0')}-${m[3].padStart(2,'0')}` : '';
-      return {
-        date, time: r.time,
-        name: r.name, phone: r.phone,
-        people: parseInt(r.people, 10) || null,
-        course: r.course, price: r.price, media: r.media,
+      // 氏名セルにフリガナが同居していることがあるので分解する。
+      const { name: nm, kana } = splitKana(r.name);
+      // 金額に決済方法が続く場合を切り分ける。
+      const { price, payment } = splitPrice(r.price);
+      return normalize({
+        site: 'ウラカタ',
+        bookingNo: null,           // ウラカタの一覧には予約番号の列が無い
         status: statuses[idx] || '確定',   // 確定 / 仮予約 / キャンセル
-      };
+        date, time: r.time,
+        people: r.people,
+        name: nm, kana,
+        phone: r.phone,
+        plan: r.course,
+        price, payment,
+        media: r.media,
+        applied: r.applied,        // 申込日時（読んでいたが出力から漏れていた）
+        note: null,
+      });
     }).filter((r) => r.date && (RECON_FROM ? (r.date >= RECON_FROM && r.date <= RECON_TO) : r.date >= todayStr));
 
     const result = {
