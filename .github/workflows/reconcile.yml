@@ -18,6 +18,10 @@ on:
         description: "true=在庫の絶対値セットも実行（既定はモードのみ）"
         required: false
         default: "false"
+      dump_row:
+        description: "true=各OTAの予約一覧の全セルをログに出す（取得項目の調査用・書込なし）"
+        required: false
+        default: "false"
 
 concurrency:
   group: ota-sync          # 在庫減算と同時にじゃらんへログインしない
@@ -54,6 +58,7 @@ jobs:
           JALAN_ID:       ${{ secrets.JALAN_ID }}
           JALAN_PASSWORD: ${{ secrets.JALAN_PASSWORD }}
           HEADLESS:       "true"
+          DUMP_ROW:       ${{ github.event.inputs.dump_row || 'false' }}
         run: node reconcile-jalan.js
 
       - name: Post to GAS for reconciliation
@@ -121,6 +126,7 @@ jobs:
           AJ_ID:       ${{ secrets.AJ_ID }}
           AJ_PASSWORD: ${{ secrets.AJ_PASSWORD }}
           HEADLESS:    "true"
+          DUMP_ROW:    ${{ github.event.inputs.dump_row || 'false' }}
         run: node reconcile-aj.js
 
       - name: Post AJ to GAS for reconciliation
