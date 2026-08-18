@@ -138,9 +138,16 @@ async function main() {
         let people = '';
         const pc = tr.querySelector('td.text-center b.hidden-xs');
         if (pc) people = pc.textContent.trim();
-        return { bookingNo, status, perform, name, people };
+        // 診断（DUMP_ROW=true）：一覧行に実際どんな列があるかを丸ごと出す。
+        // 推測でセレクタを書くと取りこぼすため、実DOMを見てから抽出を決める。
+        const cells = [...tr.querySelectorAll('td')].map((td, i) =>
+          `[${i}] ${td.textContent.replace(/\s+/g, ' ').trim().slice(0, 80)}`);
+        return { bookingNo, status, perform, name, people, _cells: cells, _detailUrl: url };
       }));
-      rows.forEach(r => all.push(r));
+      if (process.env.DUMP_ROW === 'true') {
+        for (const r of rows.slice(0, 3)) log('dump_row', { name: r.name, detailUrl: r._detailUrl, cells: r._cells });
+      }
+      rows.forEach(r => { delete r._cells; delete r._detailUrl; all.push(r); });
       log('page_read', { page: p + 1, rows: rows.length, total: all.length });
 
       // 次ページ（ページネーションの「次」）

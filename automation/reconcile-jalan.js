@@ -172,10 +172,17 @@ async function main() {
         const tds  = tr.querySelectorAll('td');
         const plan  = tds.length > 5 ? tds[5].textContent.trim() : '';
         const price = tds.length > 6 ? tds[6].textContent.trim().split('\n')[0] : '';
-        return { bookingNo, expText, people, name: name.trim().replace(/\s+/g, ' '), status, plan, price };
+        // 診断（DUMP_ROW=true）：一覧行の全セルを出して、取得できる項目を確認する。
+        const cells = [...tds].map((td, i) =>
+          `[${i}] ${td.textContent.replace(/\s+/g, ' ').trim().slice(0, 80)}`);
+        return { bookingNo, expText, people, name: name.trim().replace(/\s+/g, ' '), status, plan, price, _cells: cells };
       }));
 
+      if (process.env.DUMP_ROW === 'true') {
+        for (const r of rows.slice(0, 3)) log('dump_row', { name: r.name, cells: r._cells });
+      }
       for (const r of rows) {
+        delete r._cells;
         const { date, time } = parseExperience(r.expText);
         all.push({
           bookingNo: r.bookingNo,
