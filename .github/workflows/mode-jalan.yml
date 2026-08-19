@@ -84,7 +84,9 @@ jobs:
           if [ -z "$LINE_TOKEN" ] || [ -z "$LINE_USER" ]; then
             echo "LINE未設定のため通知スキップ"; exit 0
           fi
-          TEXT="🚨【至急】じゃらんの枠モード切替に失敗しました\n対象: ${SLOT_DATE} ${SLOT_TIME} → ${MODE}（発生元: ${SOURCE_SITE}）\n影響: 即予約/リクエストの状態が想定と異なる可能性\n👉 じゃらん管理画面で枠状態を手動確認してください\nログ: ${RUN_URL}"
+          # LINEに実際の改行を送る。ダブルクォート内の \n は文字列 "\n" のまま
+          # 送られてしまうため、printf %b で改行に展開する。
+          TEXT=$(printf '%b' "🚨【至急】じゃらんの枠モード切替に失敗しました\n対象: ${SLOT_DATE} ${SLOT_TIME} → ${MODE}（発生元: ${SOURCE_SITE}）\n影響: 即予約/リクエストの状態が想定と異なる可能性\n👉 じゃらん管理画面で枠状態を手動確認してください\nログ: ${RUN_URL}")
           PAYLOAD=$(jq -nc --arg to "$LINE_USER" --arg text "$TEXT" '{to:$to, messages:[{type:"text", text:$text}]}')
           curl -sS -X POST https://api.line.me/v2/bot/message/push \
             -H "Authorization: Bearer $LINE_TOKEN" \

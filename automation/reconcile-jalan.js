@@ -24,7 +24,7 @@
 
 import { chromium } from 'playwright';
 import fs from 'fs';
-import { normalize, splitKana, splitPrice, findPhone } from './reservation-schema.js';
+import { normalize, splitKana, splitPrice, findPhone, contactFromText } from './reservation-schema.js';
 
 const CONFIG = {
   topUrl:   'https://activityboard.jp/',
@@ -157,10 +157,21 @@ async function main() {
 
     // ---------- 4. 全ページの行を読み取り ----------
     const all = [];
+    // 詳細ページ巡回用に、予約番号とリンク情報だけ別途ためておく（ページ送りで失われるため）
+    const rowMeta = [];
     for (let p = 0; p < CONFIG.maxPages; p++) {
       const rows = await mng.$$eval('#bookingSearchList > tr', (trs) => trs.map((tr) => {
         const pick = (sel) => { const el = tr.querySelector(sel); return el ? el.textContent.trim() : ''; };
         const bookingNo = pick('a.js-popupReserveNum');
+        // 詳細ページのURL。href が javascript: 等で使えない場合に備え、
+        // data-* 属性も候補として拾っておく（決め打ちで取りこぼさないため）。
+        const noEl = tr.querySelector('a.js-popupReserveNum');
+        const detailUrl = noEl
+          ? (['href', 'data-url', 'data-href', 'data-link']
+              .map((a) => noEl.getAttribute(a) || '')
+              .find((v) => /^https?:|^\//.test(v)) || '')
+          : '';
+        const detailHtml = noEl ? noEl.outerHTML.slice(0, 300) : '';
         const expText   = pick('td.termCol');
         const people    = pick('td.nameData .is-twoRow');
         const name      = (tr.querySelector('td.nameData span') || {}).textContent || '';
@@ -181,13 +192,14 @@ async function main() {
         const cells = [...tds].map((td, i) =>
           `[${i}] ${td.textContent.replace(/\s+/g, ' ').trim().slice(0, 80)}`);
         return { bookingNo, expText, people, name: name.trim().replace(/\s+/g, ' '), status,
-                 plan, price, applied, nameCell, route, _cells: cells };
+                 plan, price, applied, nameCell, route, detailUrl, detailHtml, _cells: cells };
       }));
 
       if (process.env.DUMP_ROW === 'true') {
-        for (const r of rows.slice(0, 3)) log('dump_row', { name: r.name, cells: r._cells });
+        for (const r of rows.slice(0, 3)) log('dump_row', { name: r.name, cells: r._cells, detailHtml: r.detailHtml });
       }
       for (const r of rows) {
+        rowMeta.push({ bookingNo: r.bookingNo, detailUrl: r.detailUrl, detailHtml: r.detailHtml });
         const cells = r._cells || [];
         delete r._cells;
         const { date, time } = parseExperience(r.expText);
@@ -204,7 +216,8 @@ async function main() {
           people:    r.people,
           name:      nm || r.name,
           kana,
-          phone:     findPhone(cells),
+          phone:     findPhone(cells),   // 詳細ページからの補完は後段で上書きする
+          email:     null,
           plan:      r.plan,
           price,
           payment,
@@ -220,6 +233,37 @@ async function main() {
       if (await next.count() === 0) break;
       await next.click();
       await mng.waitForTimeout(1200);
+    }
+
+    // ---------- 4c. 詳細ページから連絡先を補完 ----------
+    // じゃらんの一覧には電話番号の列が無いので、予約番号リンクの詳細を開いて本文から拾う。
+    // href が使える場合は直接開き、javascript: などで使えない場合はリンクを
+    // クリックしてポップアップを受け取る。予約数ぶん遷移が増えるため上限を設ける。
+    if (process.env.PHONE_DETAIL !== 'false') {
+      const max = Number(process.env.DETAIL_MAX || 80);
+      const byNo = new Map(all.map((r) => [r.bookingNo, r]));
+      const targets = rowMeta.filter((m) => m.bookingNo).slice(0, max);
+      let ok = 0, ng = 0, noUrl = 0;
+      const sub = await mng.context().newPage();
+      for (const m of targets) {
+        const rec = byNo.get(m.bookingNo);
+        if (!rec) continue;
+        try {
+          if (!m.detailUrl) { noUrl++; continue; }
+          await sub.goto(new URL(m.detailUrl, mng.url()).href,
+                         { waitUntil: 'domcontentloaded', timeout: 20000 });
+          const c = contactFromText(await sub.evaluate(() => document.body.innerText));
+          if (c.phone) { rec.phone = c.phone; ok++; } else ng++;
+          if (c.email) rec.email = c.email;
+        } catch (e) {
+          ng++;
+          log('detail_failed', { bookingNo: m.bookingNo, message: e.message });
+        }
+      }
+      await sub.close().catch(() => {});
+      // noUrl が多い場合は href からは辿れないということ。detailHtml を出して次の手を判断する。
+      if (noUrl) log('detail_no_url', { count: noUrl, sample: targets.find((t) => !t.detailUrl)?.detailHtml || '' });
+      log('detail_scanned', { tried: targets.length, withPhone: ok, without: ng, noUrl });
     }
 
     // ---------- 5. 体験日で絞って出力（RECON_FROM/RECON_TO 指定時は過去も対象） ----------
