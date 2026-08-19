@@ -328,11 +328,19 @@ async function closeDetailModal(page) {
   }, JALAN_POPUP).catch(() => {});
 }
 
-// パネルが実際に消えたか（見えていなければ閉じたとみなす）
+// パネルが実際に消えたか。
+// offsetParent での可視判定は使えない：position:fixed の要素は表示中でも
+// offsetParent が null になるため、閉じていないのに「閉じた」と誤判定して
+// 最後の手段（強制非表示）まで到達しなかった。実際にこれで2件取りこぼした。
+// 描画矩形と computed style で判定する。
 async function isClosed(page) {
   return page.waitForFunction((sel) => {
-    const els = [...document.querySelectorAll(sel)];
-    return !els.some((e) => e.offsetParent !== null);
+    return [...document.querySelectorAll(sel)].every((e) => {
+      const st = getComputedStyle(e);
+      if (st.display === 'none' || st.visibility === 'hidden' || st.pointerEvents === 'none') return true;
+      const r = e.getBoundingClientRect();
+      return r.width === 0 || r.height === 0;
+    });
   }, JALAN_POPUP, { timeout: 2500 }).then(() => true).catch(() => false);
 }
 
