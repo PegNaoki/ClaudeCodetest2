@@ -24,7 +24,7 @@
 
 import { chromium } from 'playwright';
 import fs from 'fs';
-import { normalize, splitKana, splitPrice, findPhone } from './reservation-schema.js';
+import { normalize, splitKana, splitPrice, findPhone, contactFromText } from './reservation-schema.js';
 
 const CONFIG = {
   topUrl:   'https://activityboard.jp/',
@@ -157,10 +157,17 @@ async function main() {
 
     // ---------- 4. 全ページの行を読み取り ----------
     const all = [];
+    // 詳細巡回の集計と件数上限（予約数ぶんクリックが増えるため上限を設ける）
+    let detailBudget = Number(process.env.DETAIL_MAX || 80), detailOk = 0, detailNg = 0;
     for (let p = 0; p < CONFIG.maxPages; p++) {
       const rows = await mng.$$eval('#bookingSearchList > tr', (trs) => trs.map((tr) => {
         const pick = (sel) => { const el = tr.querySelector(sel); return el ? el.textContent.trim() : ''; };
         const bookingNo = pick('a.js-popupReserveNum');
+        // 予約番号リンクは href="#" で data-booking-id を使いJSで開く方式のため、
+        // URLとしては辿れない。詳細はクリックして開く（後段）。構造が変わったときの
+        // 手掛かりとしてリンクのHTMLだけ診断用に残す。
+        const noEl = tr.querySelector('a.js-popupReserveNum');
+        const detailHtml = noEl ? noEl.outerHTML.slice(0, 300) : '';
         const expText   = pick('td.termCol');
         const people    = pick('td.nameData .is-twoRow');
         const name      = (tr.querySelector('td.nameData span') || {}).textContent || '';
@@ -181,11 +188,11 @@ async function main() {
         const cells = [...tds].map((td, i) =>
           `[${i}] ${td.textContent.replace(/\s+/g, ' ').trim().slice(0, 80)}`);
         return { bookingNo, expText, people, name: name.trim().replace(/\s+/g, ' '), status,
-                 plan, price, applied, nameCell, route, _cells: cells };
+                 plan, price, applied, nameCell, route, detailHtml, _cells: cells };
       }));
 
       if (process.env.DUMP_ROW === 'true') {
-        for (const r of rows.slice(0, 3)) log('dump_row', { name: r.name, cells: r._cells });
+        for (const r of rows.slice(0, 3)) log('dump_row', { name: r.name, cells: r._cells, detailHtml: r.detailHtml });
       }
       for (const r of rows) {
         const cells = r._cells || [];
@@ -204,7 +211,8 @@ async function main() {
           people:    r.people,
           name:      nm || r.name,
           kana,
-          phone:     findPhone(cells),
+          phone:     findPhone(cells),   // 詳細ページからの補完は後段で上書きする
+          email:     null,
           plan:      r.plan,
           price,
           payment,
@@ -213,6 +221,39 @@ async function main() {
           note:      r.route,
         }));
       }
+      // ---------- 詳細から連絡先を補完（このページ分） ----------
+      // じゃらんの一覧に電話番号の列は無く、予約番号リンクは href="#" で
+      // data-booking-id を使いJSで開く方式のため、URL直打ちでは辿れない。
+      // リンクを実際にクリックして開いた内容から拾う。別ウィンドウ／同一ページ内
+      // モーダルのどちらで開くか断定できないので、両方に対応する。
+      // ページ送りで行が入れ替わるため、必ずこのページを読み終えた直後に行う。
+      if (process.env.PHONE_DETAIL !== 'false' && detailBudget > 0) {
+        const links = mng.locator('#bookingSearchList > tr a.js-popupReserveNum');
+        const n = Math.min(await links.count(), detailBudget);
+        for (let i = 0; i < n; i++) {
+          const no = (await links.nth(i).textContent().catch(() => ''))?.trim();
+          const rec = no ? all.find((x) => x.bookingNo === no) : null;
+          if (!rec) continue;
+          detailBudget--;
+          try {
+            const popupP = mng.waitForEvent('popup', { timeout: 4000 }).catch(() => null);
+            await links.nth(i).click({ timeout: 8000 });
+            const pop = await popupP;
+            const target = pop || mng;
+            if (pop) await pop.waitForLoadState('domcontentloaded').catch(() => {});
+            else await mng.waitForTimeout(1500);   // モーダルの描画待ち
+            const c = contactFromText(await target.evaluate(() => document.body.innerText));
+            if (c.phone) { rec.phone = c.phone; detailOk++; } else detailNg++;
+            if (c.email) rec.email = c.email;
+            if (pop) await pop.close().catch(() => {});
+            else await closeDetailModal(mng);
+          } catch (e) {
+            detailNg++;
+            log('detail_failed', { bookingNo: no, message: e.message });
+          }
+        }
+      }
+
       log('page_read', { page: p + 1, rows: rows.length, total: all.length });
 
       // 次ページがあるか（.next の a に .hide が付いていたら終わり）
@@ -221,6 +262,8 @@ async function main() {
       await next.click();
       await mng.waitForTimeout(1200);
     }
+
+    if (process.env.PHONE_DETAIL !== 'false') log('detail_scanned', { withPhone: detailOk, without: detailNg });
 
     // ---------- 5. 体験日で絞って出力（RECON_FROM/RECON_TO 指定時は過去も対象） ----------
     const RECON_FROM = process.env.RECON_FROM || '';
@@ -251,6 +294,54 @@ async function main() {
   } finally {
     await browser.close();
   }
+}
+
+// 予約詳細パネルを確実に閉じる。閉じ残るとオーバーレイが次の行のリンクを
+// 覆ってしまい、2件目以降のクリックがタイムアウトする（実際に発生した）。
+// じゃらんの詳細は Bootstrap モーダルではなく
+// div.ly-popupWrapper.js-reservePopupTarget というスライドインパネル。
+// 閉じるボタンの実装は断定できないので候補を順に試し、それでも残る場合は
+// 最後の手段としてJSで隠す（一覧の読み取りは既に済んでいるため実害はない）。
+const JALAN_POPUP = '.ly-popupWrapper.js-reservePopupTarget';
+
+async function closeDetailModal(page) {
+  const closers = [`${JALAN_POPUP} .js-popupClose`, `${JALAN_POPUP} [class*="close"]`,
+                   `${JALAN_POPUP} [class*="Close"]`, `${JALAN_POPUP} button`,
+                   '.js-popupClose', '[data-dismiss="modal"]'];
+  for (const sel of closers) {
+    const l = page.locator(sel).first();
+    if (await l.count().catch(() => 0) && await l.isVisible().catch(() => false)) {
+      await l.click({ timeout: 2000 }).catch(() => {});
+      if (await isClosed(page)) return;
+    }
+  }
+  await page.keyboard.press('Escape').catch(() => {});
+  if (await isClosed(page)) return;
+
+  // まだ残っている：ポインタを奪う要素を直接隠す
+  await page.evaluate((sel) => {
+    document.querySelectorAll(sel).forEach((el) => {
+      el.classList.remove('is-slideAnime');
+      el.style.display = 'none';
+      el.style.pointerEvents = 'none';
+    });
+  }, JALAN_POPUP).catch(() => {});
+}
+
+// パネルが実際に消えたか。
+// offsetParent での可視判定は使えない：position:fixed の要素は表示中でも
+// offsetParent が null になるため、閉じていないのに「閉じた」と誤判定して
+// 最後の手段（強制非表示）まで到達しなかった。実際にこれで2件取りこぼした。
+// 描画矩形と computed style で判定する。
+async function isClosed(page) {
+  return page.waitForFunction((sel) => {
+    return [...document.querySelectorAll(sel)].every((e) => {
+      const st = getComputedStyle(e);
+      if (st.display === 'none' || st.visibility === 'hidden' || st.pointerEvents === 'none') return true;
+      const r = e.getBoundingClientRect();
+      return r.width === 0 || r.height === 0;
+    });
+  }, JALAN_POPUP, { timeout: 2500 }).then(() => true).catch(() => false);
 }
 
 main();

@@ -30,6 +30,9 @@ concurrency:
 jobs:
   reconcile:
     runs-on: ubuntu-latest
+    # 既定のジョブ上限は6時間。Chromiumのインストールがハングして5時間以上
+    # 枠を占有し、concurrency で後続の実行が全て詰まったことがあるため上限を設ける。
+    timeout-minutes: 45
     env:
       TZ: Asia/Tokyo   # 枠の日付は日本時間で判定する
     steps:
@@ -44,6 +47,7 @@ jobs:
         run: npm install
 
       - name: Install Chromium
+        timeout-minutes: 10
         working-directory: automation
         run: npx playwright install --with-deps chromium
 
@@ -234,9 +238,13 @@ jobs:
           [ "$URAKATA_OUTCOME" = "failure" ] && FAILED="${FAILED}ウラカタ "
           [ "$AJ_OUTCOME"      = "failure" ] && FAILED="${FAILED}アクティビティジャパン "
           if [ -n "$FAILED" ]; then
-            TEXT="⚠️【定期突合 失敗】予約一覧の読み取りに失敗: ${FAILED}\n※予約数が不完全なため在庫反映は中止されます\nログ: ${RUN_URL}"
+            # LINEに実際の改行を送る。ダブルクォート内の \n は文字列 "\n" のまま
+            # 送られてしまうため、printf %b で改行に展開する。
+            TEXT=$(printf '%b' "⚠️【定期突合 失敗】予約一覧の読み取りに失敗: ${FAILED}\n※予約数が不完全なため在庫反映は中止されます\nログ: ${RUN_URL}")
           else
-            TEXT="⚠️【定期突合 失敗】突合または在庫反映に失敗しました\nログ: ${RUN_URL}"
+            # LINEに実際の改行を送る。ダブルクォート内の \n は文字列 "\n" のまま
+            # 送られてしまうため、printf %b で改行に展開する。
+            TEXT=$(printf '%b' "⚠️【定期突合 失敗】突合または在庫反映に失敗しました\nログ: ${RUN_URL}")
           fi
           PAYLOAD=$(jq -nc --arg to "$LINE_USER" --arg text "$TEXT" '{to:$to, messages:[{type:"text", text:$text}]}')
           curl -sS -X POST https://api.line.me/v2/bot/message/push \

@@ -20,6 +20,7 @@ export const FIELDS = [
   'payment',    // 決済方法
   'media',      // 販売媒体（ウラカタのみ実値。他はサイト名で代用）
   'applied',    // 申込日時
+  'email',      // メールアドレス（詳細ページから取得）
   'note',       // 備考
 ];
 
@@ -63,4 +64,18 @@ export function findPhone(cells) {
     if (m) return m[0];
   }
   return null;
+}
+
+// 詳細ページの本文テキストから連絡先を拾う。
+// 一覧に電話番号の列が無いサイト（じゃらん・AJ）向け。詳細ページの構造は
+// サイトごとに違ううえ変わりやすいので、セレクタを決め打ちせず本文を走査する。
+export function contactFromText(text) {
+  const t = String(text || '').replace(/[‐‑‒–—―ー]/g, '-');
+  // 電話：日本の固定/携帯。桁数の妥当な並びのみ拾う（日付や金額を誤検出しないため）
+  const tel = t.match(/0(?:\d[-\s]?){8,12}\d/);
+  const mail = t.match(/[\w.+-]+@[\w-]+\.[\w.-]+/);
+  return {
+    phone: tel ? clean(tel[0].replace(/\s/g, '')) : null,
+    email: mail ? clean(mail[0]) : null,
+  };
 }

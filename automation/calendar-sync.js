@@ -121,7 +121,8 @@ function loadReservations() {
                      people: r.people || '', plan: r.plan || r.course || '',
                      price: r.price || '', phone: r.phone || '', media: r.media || '',
                      applied: r.applied || '', kana: r.kana || '',
-                     payment: r.payment || '', status: r.status || '', raw: r });
+                     payment: r.payment || '', status: r.status || '',
+                     email: r.email || '', raw: r });
     }
   }
   return { wanted: out, missing };
@@ -168,7 +169,7 @@ function buildEvent(r) {
   // まだ整形先が無い項目も「その他」として出す（サイト側の項目追加を取りこぼさない）。
   const known = new Set(['site', 'bookingNo', 'status', 'date', 'time', 'people', 'name',
                          'kana', 'plan', 'course', 'price', 'payment', 'phone',
-                         'media', 'applied', 'note']);
+                         'media', 'applied', 'note', 'email']);
   const extra = Object.entries(r.raw || {})
     .filter(([k, v]) => !known.has(k) && v !== '' && v != null)
     .map(([k, v]) => `${k}: ${typeof v === 'object' ? JSON.stringify(v) : v}`);
@@ -191,6 +192,7 @@ function buildEvent(r) {
     `お名前: ${v(r.name)}`,
     `フリガナ: ${v(r.kana)}`,
     `電話: ${v(r.phone)}`,
+    `メール: ${v(r.email)}`,
     `申込日: ${v(r.applied)}`,
     ...(extra.length ? ['', '■ その他', ...extra] : []),
     '',

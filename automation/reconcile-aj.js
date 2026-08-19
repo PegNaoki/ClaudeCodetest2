@@ -16,7 +16,7 @@
 
 import { chromium } from 'playwright';
 import fs from 'fs';
-import { normalize, splitKana, splitPrice, findPhone, clean } from './reservation-schema.js';
+import { normalize, splitKana, splitPrice, findPhone, clean, contactFromText } from './reservation-schema.js';
 
 const CONFIG = {
   loginUrl: 'https://ptn.activityjapan.com/login',
@@ -182,6 +182,33 @@ async function main() {
       log('aj_probe_nofilter', { total: probe.length, sample: probe });
     }
 
+    // ---------- 4c. 詳細ページから連絡先を補完 ----------
+    // AJの一覧には電話番号の列が無い。行の data-url が詳細ページなので順に開いて
+    // 本文から拾う。予約数ぶんページ遷移が増えるため、上限と無効化スイッチを持たせ、
+    // 1件失敗しても在庫計算用の読み取り全体は落とさない。
+    if (process.env.PHONE_DETAIL !== 'false') {
+      const max = Number(process.env.DETAIL_MAX || 80);
+      const targets = all.filter((r) => r._detailUrl).slice(0, max);
+      const sub = await context.newPage();
+      let ok = 0, ng = 0;
+      for (const r of targets) {
+        try {
+          const url = new URL(r._detailUrl, page.url()).href;
+          await sub.goto(url, { waitUntil: 'domcontentloaded', timeout: 20000 });
+          const body = await sub.evaluate(() => document.body.innerText);
+          const c = contactFromText(body);
+          r._phone = c.phone; r._email = c.email;
+          if (c.phone) ok++; else ng++;
+        } catch (e) {
+          ng++;
+          log('detail_failed', { bookingNo: r.bookingNo, message: e.message });
+        }
+      }
+      await sub.close().catch(() => {});
+      log('detail_scanned', { tried: targets.length, withPhone: ok, without: ng,
+                              skipped: Math.max(0, all.length - targets.length) });
+    }
+
     // ---------- 5. 体験日が今日以降に整形（キャンセルは除外して有効のみ） ----------
     const todayStr = ymd(today);
     const reservations = all.map((r) => {
@@ -210,7 +237,8 @@ async function main() {
         status, date, time,
         people: r.people,
         name: nm, kana,
-        phone: findPhone(cells),
+        phone: r._phone || findPhone(cells),
+        email: r._email || null,
         plan: planCell,
         price, payment,
         media: 'アクティビティジャパン',

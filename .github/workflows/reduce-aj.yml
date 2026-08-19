@@ -22,6 +22,9 @@ concurrency:
 jobs:
   reduce:
     runs-on: ubuntu-latest
+    # 既定のジョブ上限は6時間。Chromiumのインストールがハングして5時間以上
+    # 枠を占有し、concurrency で後続の実行が全て詰まったことがあるため上限を設ける。
+    timeout-minutes: 45
     env:
       TZ: Asia/Tokyo   # 枠の日付は日本時間で判定する
     steps:
@@ -36,6 +39,7 @@ jobs:
         run: npm install
 
       - name: Install Chromium
+        timeout-minutes: 10
         working-directory: automation
         run: npx playwright install --with-deps chromium
 
@@ -69,6 +73,7 @@ jobs:
         env:
           LINE_TOKEN: ${{ secrets.LINE_CHANNEL_TOKEN }}
           LINE_USER:  ${{ secrets.LINE_USER_ID }}
+          SLOTS:      ${{ toJSON(github.event.client_payload.slots) != 'null' && toJSON(github.event.client_payload.slots) || github.event.inputs.slots }}
           SLOT_DATE:  ${{ github.event.client_payload.slot_date || github.event.inputs.slot_date }}
           SLOT_TIME:  ${{ github.event.client_payload.slot_time || github.event.inputs.slot_time }}
           SLOT_DELTA: ${{ github.event.client_payload.slot_delta || github.event.inputs.slot_delta }}
@@ -78,7 +83,22 @@ jobs:
           if [ -z "$LINE_TOKEN" ] || [ -z "$LINE_USER" ]; then
             echo "LINE未設定のため通知スキップ"; exit 0
           fi
-          TEXT="🚨【至急】アクティビティジャパン在庫の連動に失敗しました\n対象: ${SLOT_DATE} ${SLOT_TIME} ${SLOT_DELTA}名（発生元: ${SOURCE_SITE}）\n影響: AJの在庫が変わっていない可能性 → オーバーブッキング懸念\n👉 AJ管理画面で在庫を手動調整してください\nログ: ${RUN_URL}"
+          # LINEに実際の改行を送る。ダブルクォート内の \n は文字列 "\n" のまま
+          # 送られてしまうため、printf %b で改行に展開する。
+          # 対象の枠。GASは1枠ずつ(slot_date/slot_time)と一括(slots配列)の
+          # 両方の送り方をするため、slots のときも必ず中身を出す。
+          # 以前は slot_date しか見ておらず「対象: →」と空欄になっていた。
+          if [ -n "$SLOT_DATE" ]; then
+            TARGET="${SLOT_DATE} ${SLOT_TIME} ${SLOT_DELTA}名"
+          elif [ -n "$SLOTS" ] && [ "$SLOTS" != "null" ]; then
+            N=$(printf '%s' "$SLOTS" | jq 'length' 2>/dev/null || echo '?')
+            LIST=$(printf '%s' "$SLOTS" | jq -r '[.[] | "\(.date) \(.time)"] | join(", ")' 2>/dev/null | cut -c1-300)
+            TARGET="${N}枠 (${LIST})"
+          else
+            TARGET="(対象不明)"
+          fi
+          [ -n "$SOURCE_SITE" ] || SOURCE_SITE="不明"
+          TEXT=$(printf '%b' "🚨【至急】アクティビティジャパン在庫の連動に失敗しました\n対象: ${TARGET}（発生元: ${SOURCE_SITE}）\n影響: AJの在庫が変わっていない可能性 → オーバーブッキング懸念\n👉 AJ管理画面で在庫を手動調整してください\nログ: ${RUN_URL}")
           PAYLOAD=$(jq -nc --arg to "$LINE_USER" --arg text "$TEXT" '{to:$to, messages:[{type:"text", text:$text}]}')
           curl -sS -X POST https://api.line.me/v2/bot/message/push \
             -H "Authorization: Bearer $LINE_TOKEN" \
