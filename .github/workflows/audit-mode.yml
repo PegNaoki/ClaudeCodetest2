@@ -19,6 +19,9 @@ concurrency:
 jobs:
   audit:
     runs-on: ubuntu-latest
+    # 既定のジョブ上限は6時間。Chromiumのインストールがハングして5時間以上
+    # 枠を占有し、concurrency で後続の実行が全て詰まったことがあるため上限を設ける。
+    timeout-minutes: 45
     env:
       TZ: Asia/Tokyo   # 枠の日付は日本時間で判定する
       # 既定の監査対象枠（inputs.slots が空のとき使用）
@@ -45,6 +48,7 @@ jobs:
         run: npm install
 
       - name: Install Chromium
+        timeout-minutes: 10
         working-directory: automation
         run: npx playwright install --with-deps chromium
 
