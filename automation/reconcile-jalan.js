@@ -157,20 +157,16 @@ async function main() {
 
     // ---------- 4. 全ページの行を読み取り ----------
     const all = [];
-    // 詳細ページ巡回用に、予約番号とリンク情報だけ別途ためておく（ページ送りで失われるため）
-    const rowMeta = [];
+    // 詳細巡回の集計と件数上限（予約数ぶんクリックが増えるため上限を設ける）
+    let detailBudget = Number(process.env.DETAIL_MAX || 80), detailOk = 0, detailNg = 0;
     for (let p = 0; p < CONFIG.maxPages; p++) {
       const rows = await mng.$$eval('#bookingSearchList > tr', (trs) => trs.map((tr) => {
         const pick = (sel) => { const el = tr.querySelector(sel); return el ? el.textContent.trim() : ''; };
         const bookingNo = pick('a.js-popupReserveNum');
-        // 詳細ページのURL。href が javascript: 等で使えない場合に備え、
-        // data-* 属性も候補として拾っておく（決め打ちで取りこぼさないため）。
+        // 予約番号リンクは href="#" で data-booking-id を使いJSで開く方式のため、
+        // URLとしては辿れない。詳細はクリックして開く（後段）。構造が変わったときの
+        // 手掛かりとしてリンクのHTMLだけ診断用に残す。
         const noEl = tr.querySelector('a.js-popupReserveNum');
-        const detailUrl = noEl
-          ? (['href', 'data-url', 'data-href', 'data-link']
-              .map((a) => noEl.getAttribute(a) || '')
-              .find((v) => /^https?:|^\//.test(v)) || '')
-          : '';
         const detailHtml = noEl ? noEl.outerHTML.slice(0, 300) : '';
         const expText   = pick('td.termCol');
         const people    = pick('td.nameData .is-twoRow');
@@ -192,14 +188,13 @@ async function main() {
         const cells = [...tds].map((td, i) =>
           `[${i}] ${td.textContent.replace(/\s+/g, ' ').trim().slice(0, 80)}`);
         return { bookingNo, expText, people, name: name.trim().replace(/\s+/g, ' '), status,
-                 plan, price, applied, nameCell, route, detailUrl, detailHtml, _cells: cells };
+                 plan, price, applied, nameCell, route, detailHtml, _cells: cells };
       }));
 
       if (process.env.DUMP_ROW === 'true') {
         for (const r of rows.slice(0, 3)) log('dump_row', { name: r.name, cells: r._cells, detailHtml: r.detailHtml });
       }
       for (const r of rows) {
-        rowMeta.push({ bookingNo: r.bookingNo, detailUrl: r.detailUrl, detailHtml: r.detailHtml });
         const cells = r._cells || [];
         delete r._cells;
         const { date, time } = parseExperience(r.expText);
@@ -226,6 +221,39 @@ async function main() {
           note:      r.route,
         }));
       }
+      // ---------- 詳細から連絡先を補完（このページ分） ----------
+      // じゃらんの一覧に電話番号の列は無く、予約番号リンクは href="#" で
+      // data-booking-id を使いJSで開く方式のため、URL直打ちでは辿れない。
+      // リンクを実際にクリックして開いた内容から拾う。別ウィンドウ／同一ページ内
+      // モーダルのどちらで開くか断定できないので、両方に対応する。
+      // ページ送りで行が入れ替わるため、必ずこのページを読み終えた直後に行う。
+      if (process.env.PHONE_DETAIL !== 'false' && detailBudget > 0) {
+        const links = mng.locator('#bookingSearchList > tr a.js-popupReserveNum');
+        const n = Math.min(await links.count(), detailBudget);
+        for (let i = 0; i < n; i++) {
+          const no = (await links.nth(i).textContent().catch(() => ''))?.trim();
+          const rec = no ? all.find((x) => x.bookingNo === no) : null;
+          if (!rec) continue;
+          detailBudget--;
+          try {
+            const popupP = mng.waitForEvent('popup', { timeout: 4000 }).catch(() => null);
+            await links.nth(i).click();
+            const pop = await popupP;
+            const target = pop || mng;
+            if (pop) await pop.waitForLoadState('domcontentloaded').catch(() => {});
+            else await mng.waitForTimeout(1500);   // モーダルの描画待ち
+            const c = contactFromText(await target.evaluate(() => document.body.innerText));
+            if (c.phone) { rec.phone = c.phone; detailOk++; } else detailNg++;
+            if (c.email) rec.email = c.email;
+            if (pop) await pop.close().catch(() => {});
+            else await mng.keyboard.press('Escape').catch(() => {});   // モーダルを閉じる
+          } catch (e) {
+            detailNg++;
+            log('detail_failed', { bookingNo: no, message: e.message });
+          }
+        }
+      }
+
       log('page_read', { page: p + 1, rows: rows.length, total: all.length });
 
       // 次ページがあるか（.next の a に .hide が付いていたら終わり）
@@ -235,36 +263,7 @@ async function main() {
       await mng.waitForTimeout(1200);
     }
 
-    // ---------- 4c. 詳細ページから連絡先を補完 ----------
-    // じゃらんの一覧には電話番号の列が無いので、予約番号リンクの詳細を開いて本文から拾う。
-    // href が使える場合は直接開き、javascript: などで使えない場合はリンクを
-    // クリックしてポップアップを受け取る。予約数ぶん遷移が増えるため上限を設ける。
-    if (process.env.PHONE_DETAIL !== 'false') {
-      const max = Number(process.env.DETAIL_MAX || 80);
-      const byNo = new Map(all.map((r) => [r.bookingNo, r]));
-      const targets = rowMeta.filter((m) => m.bookingNo).slice(0, max);
-      let ok = 0, ng = 0, noUrl = 0;
-      const sub = await mng.context().newPage();
-      for (const m of targets) {
-        const rec = byNo.get(m.bookingNo);
-        if (!rec) continue;
-        try {
-          if (!m.detailUrl) { noUrl++; continue; }
-          await sub.goto(new URL(m.detailUrl, mng.url()).href,
-                         { waitUntil: 'domcontentloaded', timeout: 20000 });
-          const c = contactFromText(await sub.evaluate(() => document.body.innerText));
-          if (c.phone) { rec.phone = c.phone; ok++; } else ng++;
-          if (c.email) rec.email = c.email;
-        } catch (e) {
-          ng++;
-          log('detail_failed', { bookingNo: m.bookingNo, message: e.message });
-        }
-      }
-      await sub.close().catch(() => {});
-      // noUrl が多い場合は href からは辿れないということ。detailHtml を出して次の手を判断する。
-      if (noUrl) log('detail_no_url', { count: noUrl, sample: targets.find((t) => !t.detailUrl)?.detailHtml || '' });
-      log('detail_scanned', { tried: targets.length, withPhone: ok, without: ng, noUrl });
-    }
+    if (process.env.PHONE_DETAIL !== 'false') log('detail_scanned', { withPhone: detailOk, without: detailNg });
 
     // ---------- 5. 体験日で絞って出力（RECON_FROM/RECON_TO 指定時は過去も対象） ----------
     const RECON_FROM = process.env.RECON_FROM || '';
