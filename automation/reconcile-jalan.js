@@ -237,7 +237,7 @@ async function main() {
           detailBudget--;
           try {
             const popupP = mng.waitForEvent('popup', { timeout: 4000 }).catch(() => null);
-            await links.nth(i).click();
+            await links.nth(i).click({ timeout: 8000 });
             const pop = await popupP;
             const target = pop || mng;
             if (pop) await pop.waitForLoadState('domcontentloaded').catch(() => {});
@@ -246,7 +246,7 @@ async function main() {
             if (c.phone) { rec.phone = c.phone; detailOk++; } else detailNg++;
             if (c.email) rec.email = c.email;
             if (pop) await pop.close().catch(() => {});
-            else await mng.keyboard.press('Escape').catch(() => {});   // モーダルを閉じる
+            else await closeDetailModal(mng);
           } catch (e) {
             detailNg++;
             log('detail_failed', { bookingNo: no, message: e.message });
@@ -294,6 +294,28 @@ async function main() {
   } finally {
     await browser.close();
   }
+}
+
+// 予約詳細モーダルを確実に閉じる。閉じ残るとオーバーレイが次の行のリンクを
+// 覆ってしまい、2件目以降のクリックがタイムアウトする（実際に発生した）。
+// 閉じるボタンの実装を断定できないので複数候補を試し、最後にオーバーレイが
+// 消えたことを確認してから戻る。
+async function closeDetailModal(page) {
+  const closers = ['.modal.show [data-dismiss="modal"]', '.modal [data-dismiss="modal"]',
+                   '.modal.show .close', '.modal .close',
+                   'button:has-text("閉じる")', 'a:has-text("閉じる")'];
+  for (const sel of closers) {
+    const l = page.locator(sel).first();
+    if (await l.count().catch(() => 0) && await l.isVisible().catch(() => false)) {
+      await l.click({ timeout: 3000 }).catch(() => {});
+      break;
+    }
+  }
+  await page.keyboard.press('Escape').catch(() => {});
+  await page.waitForFunction(() => {
+    const els = [...document.querySelectorAll('.modal, .modal-backdrop, [role=dialog]')];
+    return !els.some((e) => e.offsetParent !== null);
+  }, { timeout: 5000 }).catch(() => {});
 }
 
 main();
