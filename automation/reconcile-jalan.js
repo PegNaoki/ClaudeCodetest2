@@ -296,26 +296,44 @@ async function main() {
   }
 }
 
-// 予約詳細モーダルを確実に閉じる。閉じ残るとオーバーレイが次の行のリンクを
+// 予約詳細パネルを確実に閉じる。閉じ残るとオーバーレイが次の行のリンクを
 // 覆ってしまい、2件目以降のクリックがタイムアウトする（実際に発生した）。
-// 閉じるボタンの実装を断定できないので複数候補を試し、最後にオーバーレイが
-// 消えたことを確認してから戻る。
+// じゃらんの詳細は Bootstrap モーダルではなく
+// div.ly-popupWrapper.js-reservePopupTarget というスライドインパネル。
+// 閉じるボタンの実装は断定できないので候補を順に試し、それでも残る場合は
+// 最後の手段としてJSで隠す（一覧の読み取りは既に済んでいるため実害はない）。
+const JALAN_POPUP = '.ly-popupWrapper.js-reservePopupTarget';
+
 async function closeDetailModal(page) {
-  const closers = ['.modal.show [data-dismiss="modal"]', '.modal [data-dismiss="modal"]',
-                   '.modal.show .close', '.modal .close',
-                   'button:has-text("閉じる")', 'a:has-text("閉じる")'];
+  const closers = [`${JALAN_POPUP} .js-popupClose`, `${JALAN_POPUP} [class*="close"]`,
+                   `${JALAN_POPUP} [class*="Close"]`, `${JALAN_POPUP} button`,
+                   '.js-popupClose', '[data-dismiss="modal"]'];
   for (const sel of closers) {
     const l = page.locator(sel).first();
     if (await l.count().catch(() => 0) && await l.isVisible().catch(() => false)) {
-      await l.click({ timeout: 3000 }).catch(() => {});
-      break;
+      await l.click({ timeout: 2000 }).catch(() => {});
+      if (await isClosed(page)) return;
     }
   }
   await page.keyboard.press('Escape').catch(() => {});
-  await page.waitForFunction(() => {
-    const els = [...document.querySelectorAll('.modal, .modal-backdrop, [role=dialog]')];
+  if (await isClosed(page)) return;
+
+  // まだ残っている：ポインタを奪う要素を直接隠す
+  await page.evaluate((sel) => {
+    document.querySelectorAll(sel).forEach((el) => {
+      el.classList.remove('is-slideAnime');
+      el.style.display = 'none';
+      el.style.pointerEvents = 'none';
+    });
+  }, JALAN_POPUP).catch(() => {});
+}
+
+// パネルが実際に消えたか（見えていなければ閉じたとみなす）
+async function isClosed(page) {
+  return page.waitForFunction((sel) => {
+    const els = [...document.querySelectorAll(sel)];
     return !els.some((e) => e.offsetParent !== null);
-  }, { timeout: 5000 }).catch(() => {});
+  }, JALAN_POPUP, { timeout: 2500 }).then(() => true).catch(() => false);
 }
 
 main();
