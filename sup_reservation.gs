@@ -1389,17 +1389,35 @@ function loadCapacityMaster_(ss) {
   return { defaults, overrides, forces };
 }
 
-// 「8/8」「8月8日」等を今年基準で YYYY-MM-DD に（年跨ぎは過去なら翌年扱い）
+// 「8/8」「8月8日」等（年の無い表記）を YYYY-MM-DD に。
+// 前年・今年・翌年のうち「今日に最も近い年」を採る。
+//
+// 以前は「今日より前なら翌年」としていたが、これだと昨日や今日の枠まで
+// 1年先に飛んでいた。実際、8/20の実行で「8/19」が 2027-08-19 と解釈され、
+// 存在しない枠を切り替えようとして枠モード切替が失敗していた。
+// 最近接で選べば、12月に「1/5」を翌年と解釈する本来の年跨ぎは保ったまま、
+// 直前に過ぎた日付を誤って1年先へ飛ばすことがなくなる。
 function normalizeMonthDay_(v) {
   const m = String(v).match(/(\d{1,2})[\/月](\d{1,2})/);
   if (!m) return '';
-  const now = new Date();
-  let year = now.getFullYear();
   const mm = parseInt(m[1], 10), dd = parseInt(m[2], 10);
-  const cand = `${year}-${String(mm).padStart(2,'0')}-${String(dd).padStart(2,'0')}`;
-  const todayStr = Utilities.formatDate(now, 'Asia/Tokyo', 'yyyy-MM-dd');
-  if (cand < todayStr) year += 1; // 既に過去なら翌年の同月日
-  return `${year}-${String(mm).padStart(2,'0')}-${String(dd).padStart(2,'0')}`;
+  const todayStr = Utilities.formatDate(new Date(), 'Asia/Tokyo', 'yyyy-MM-dd');
+  const baseYear = parseInt(todayStr.slice(0, 4), 10);
+  const todayMs  = new Date(todayStr + 'T00:00:00+09:00').getTime();
+
+  let best = '', bestDiff = Infinity;
+  [baseYear - 1, baseYear, baseYear + 1].forEach(y => {
+    const s  = `${y}-${String(mm).padStart(2,'0')}-${String(dd).padStart(2,'0')}`;
+    const dt = new Date(s + 'T00:00:00+09:00');
+    // 存在しない日付（平年の2/29など）はJSが黙って翌日に繰り上げるので、
+    // 書き戻して一致するかで妥当性を確かめる。一致しなければ候補にしない。
+    if (isNaN(dt.getTime())) return;
+    if (Utilities.formatDate(dt, 'Asia/Tokyo', 'yyyy-MM-dd') !== s) return;
+    const ms = dt.getTime();
+    const diff = Math.abs(ms - todayMs);
+    if (diff < bestDiff) { bestDiff = diff; best = s; }
+  });
+  return best;
 }
 
 // 日本の祝日セットを取得（YYYY-MM-DD の Set）。範囲を1回だけ読み込む。
