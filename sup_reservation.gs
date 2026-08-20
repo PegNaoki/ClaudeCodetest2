@@ -86,8 +86,8 @@ const COLUMNS = {
 // 集合案内メールの固定情報（じゃらん掲載情報より）
 const MEETING_INFO = {
   placeName: 'Go Retreat Aizu（秋元湖）',
-  address:   '〒969-2751 福島県耶麻郡猪苗代町若宮吾妻山甲2998-713',
-  mapUrl:    'https://maps.app.goo.gl/Sq1CkEwMwhTYdt4YA',
+  address:   '〒969-2751 福島県耶麻郡猪苗代町若宮吾妻山甲2998-9',
+  mapUrl:    'https://maps.app.goo.gl/aPqdN6dqMJSyx6c16',
   tel:       '080-2024-0863',
   senderName:'GoRETREAT AIZU',
 };
