@@ -107,6 +107,16 @@ async function main() {
     for (const t of targets) {
       try {
         const cell = await getCell(mng, t.date, t.time);
+        // 診断（DEBUG_DOM=true）：判定結果だけでは「本当に売止なのか、
+        // 読み取りに失敗して売止に倒れているのか」が区別できないため、
+        // セルの実際の中身を出す。推測で結論を出さないための材料。
+        if (process.env.DEBUG_DOM === 'true') {
+          const dump = await cell.evaluate(el => ({
+            text: (el.innerText || '').replace(/\s+/g, ' ').trim().slice(0, 200),
+            html: el.innerHTML.replace(/\s+/g, ' ').slice(0, 600),
+          })).catch(() => null);
+          log('cell_dump', { date: t.date, time: t.time, ...(dump || {}) });
+        }
         const mode = await readCellMode(cell);
         const remainImmediate = await readStock(cell); // 残数
         results.push({ site: 'jalan', date: t.date, time: t.time, mode: mode || 'unknown', raw: mode, remainImmediate });

@@ -11,6 +11,10 @@ on:
         description: '監査対象の枠（JSON配列）。空なら既定の今後枠を使用'
         required: false
         default: ''
+      debug_dom:
+        description: 'true=セルの実DOMをログ出力（判定が怪しいときの切り分け用）'
+        required: false
+        default: 'false'
 
 concurrency:
   group: ota-sync          # 在庫減算/突合と同時にログインしない
@@ -71,7 +75,9 @@ jobs:
         env:
           JALAN_ID:       ${{ secrets.JALAN_ID }}
           JALAN_PASSWORD: ${{ secrets.JALAN_PASSWORD }}
+          SHOP_NAME:      ${{ secrets.SHOP_NAME }}
           HEADLESS:       "true"
+          DEBUG_DOM:      ${{ github.event.inputs.debug_dom || 'false' }}
           SLOTS:          ${{ steps.slots.outputs.value }}
         run: node audit-mode-jalan.js
 
