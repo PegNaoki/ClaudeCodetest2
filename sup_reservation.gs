@@ -1985,8 +1985,13 @@ function reconcileUrakataReservations_(payload) {
       ghost.push(`${g.k.replace(/\|/g, ' ')}（要確認）`);
     }
   });
+  // 自動修正を止める理由は「件数超過」と「サイト一覧が空」の2つある。
+  // 常に「件数超過」と書いていたため、原因の切り分けができなかった。
   const ghostNote = (!autoFixGhost && ghostRows.length > 0)
-    ? `\n（${GHOST_LIMIT}件超のため自動修正せず通知のみ・読み取り異常の可能性）` : '';
+    ? (urk.length === 0
+        ? '\n（サイト側の一覧が0件のため自動修正せず通知のみ・読み取り異常の可能性）'
+        : `\n（${GHOST_LIMIT}件超のため自動修正せず通知のみ・読み取り異常の可能性）`)
+    : '';
 
   const lines = [];
   if (missing.length)  lines.push(`⚠️ ウラカタ取りこぼし ${missing.length}件（シートに自動追記済み）\n・` + missing.join('\n・'));
@@ -2151,7 +2156,18 @@ function reconcileJalanReservations_(payload) {
           date: String(r.date || '').replace(/-/g, '/'),
           time: r.time || '', people: r.people || '',
         });
-        promoted.push(`${r.date} ${r.time} ${no}（仮予約→確定に昇格・在庫連動実行）`);
+        // 昇格そのものは止めない（サイト側で既に確定しているため、シートを
+        // 合わせないと実態とずれる）。ただし定員を超える場合は黙って通すと
+        // オーバーブッキングに気づけないので、超過分を明示して警告する。
+        // getSlotCapacity はシート内部の日付表記(2026/8/22)で突合するため、
+        // 'YYYY-MM-DD' の文字列をそのまま渡すと一致せず0件になる。
+        // また new Date('...+09:00') は実行環境のタイムゾーンで日付がずれるため、
+        // 年月日から直接組み立てる（ローカル時刻で解釈され、ずれない）。
+        const [cy, cm, cd] = String(r.date).split('-').map(Number);
+        const capInfo = getSlotCapacity(sheet, new Date(cy, cm - 1, cd), r.time);
+        const over = capInfo ? capInfo.total - capInfo.limit : 0;
+        promoted.push(`${r.date} ${r.time} ${no}（仮予約→確定に昇格・在庫連動実行）`
+          + (over > 0 ? `\n　🚨 定員${capInfo.limit}名に対し計${capInfo.total}名（${over}名超過）` : ''));
       }
     }
   }
