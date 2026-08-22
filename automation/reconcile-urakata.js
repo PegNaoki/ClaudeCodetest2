@@ -271,26 +271,61 @@ async function setDateRange(page, fromDate, toDate) {
   const toIdx   = parseInt(process.env.DATE_BOX_TO   || '5', 10);
   const boxes = page.getByRole('textbox');
 
+  const failed = [];
   for (const [idx, t, which] of [[fromIdx, fromDate, 'from'], [toIdx, toDate, 'to']]) {
-    await boxes.nth(idx).click();
-    const nextBtn = page.getByRole('button', { name: 'Next Month' });
-    if (!(await nextBtn.first().isVisible().catch(() => false))) {
-      log('date_box_no_calendar', { which, idx });
-      continue;
-    }
-    const y = t.getFullYear(), m = t.getMonth() + 1, d = t.getDate();
+    const box = boxes.nth(idx);
     let ok = false;
-    for (let hop = 0; hop < 24; hop++) {
-      const opt = page.getByRole('option', { name: new RegExp(`Choose ${y}年${m}月${d}日`) });
-      if (await opt.count() > 0 && await opt.first().isVisible().catch(() => false)) {
-        await opt.first().click();
-        await page.waitForTimeout(600);
-        ok = true; break;
-      }
-      await nextBtn.first().click();
-      await page.waitForTimeout(300);
+
+    // まず直接入力を試す。カレンダーUIはサイト側の変更で壊れやすく、実際に
+    // 「Choose YYYY年M月D日」が見つからず日付が入らないまま検索され、
+    // 0件の結果を正常として扱ってしまう事故が起きたため、入力を先に試みる。
+    for (const v of [ymd(t), ymd(t).replace(/-/g, '/')]) {
+      await box.fill('').catch(() => {});
+      await box.fill(v).catch(() => {});
+      const got = await box.inputValue().catch(() => '');
+      if (got && got.replace(/[\/]/g, '-').startsWith(ymd(t))) { ok = true; break; }
     }
+    if (ok) { await page.keyboard.press('Escape').catch(() => {}); }
+
+    // 直接入力が効かない実装のときはカレンダーから選ぶ（従来方式）。
+    if (!ok) {
+      await box.click();
+      const nextBtn = page.getByRole('button', { name: 'Next Month' });
+      if (!(await nextBtn.first().isVisible().catch(() => false))) {
+        log('date_box_no_calendar', { which, idx });
+      } else {
+        const y = t.getFullYear(), m = t.getMonth() + 1, d = t.getDate();
+        for (let hop = 0; hop < 24; hop++) {
+          const opt = page.getByRole('option', { name: new RegExp(`Choose ${y}年${m}月${d}日`) });
+          if (await opt.count() > 0 && await opt.first().isVisible().catch(() => false)) {
+            await opt.first().click();
+            await page.waitForTimeout(600);
+            ok = true; break;
+          }
+          await nextBtn.first().click();
+          await page.waitForTimeout(300);
+        }
+        // 見つからなかったときは、実際に何が並んでいるのかを残す。
+        // ラベル書式が変わったのか、カレンダー自体が出ていないのかを
+        // ログだけで切り分けられるようにする。
+        if (!ok) {
+          const opts = await page.getByRole('option').evaluateAll(
+            els => els.slice(0, 10).map(e => e.getAttribute('aria-label') || e.textContent.trim())
+          ).catch(() => []);
+          log('date_option_dump', { which, options: opts });
+        }
+      }
+    }
+
     log(ok ? 'date_set' : 'date_set_fail', { which, ymd: ymd(t), viaTextbox: idx });
+    if (!ok) failed.push(which);
+  }
+
+  // 日付が入らないまま検索すると全期間や0件が返り、それを正常な「予約なし」と
+  // 誤って扱ってしまう。実際にGASへ空の一覧を送り、既存予約が消えたように
+  // 見える誤検知通知が出続けた。ここで明確に失敗させる。
+  if (failed.length) {
+    throw new Error(`検索日付を設定できませんでした（${failed.join(', ')}）。UI変更の可能性があります。`);
   }
 }
 
