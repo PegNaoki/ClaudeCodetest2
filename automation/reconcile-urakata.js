@@ -276,13 +276,25 @@ async function setDateRange(page, fromDate, toDate) {
     const box = boxes.nth(idx);
     let ok = false;
 
-    // まず直接入力を試す。カレンダーUIはサイト側の変更で壊れやすく、実際に
-    // 「Choose YYYY年M月D日」が見つからず日付が入らないまま検索され、
-    // 0件の結果を正常として扱ってしまう事故が起きたため、入力を先に試みる。
+    // 日付欄は name も id も持たない匿名の input[type=text] で、値は
+    // フレームワーク側が管理している。通常の fill() では state に反映されず
+    // 値が消えてしまう（実DOMのダンプで val:"" のままなのを確認）。
+    // ネイティブの value セッターで書いてから input/change を発火させる。
     for (const v of [ymd(t), ymd(t).replace(/-/g, '/')]) {
-      await box.fill('').catch(() => {});
-      await box.fill(v).catch(() => {});
-      const got = await box.inputValue().catch(() => '');
+      await page.evaluate(({ i, val }) => {
+        const el = [...document.querySelectorAll('input[type=text]')][i];
+        if (!el) return;
+        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+        setter.call(el, val);
+        el.dispatchEvent(new Event('input',  { bubbles: true }));
+        el.dispatchEvent(new Event('change', { bubbles: true }));
+        el.dispatchEvent(new Event('blur',   { bubbles: true }));
+      }, { i: idx, val: v }).catch(() => {});
+      await page.waitForTimeout(400);
+      const got = await page.evaluate((i) => {
+        const el = [...document.querySelectorAll('input[type=text]')][i];
+        return el ? el.value : '';
+      }, idx).catch(() => '');
       if (got && got.replace(/[\/]/g, '-').startsWith(ymd(t))) { ok = true; break; }
     }
     if (ok) { await page.keyboard.press('Escape').catch(() => {}); }
