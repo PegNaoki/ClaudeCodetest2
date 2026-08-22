@@ -18,6 +18,10 @@ on:
         description: "true=在庫の絶対値セットも実行（既定はモードのみ）"
         required: false
         default: "false"
+      record:
+        description: 'true=ウラカタ読み取りの動画/トレース/HTMLを保存（画面の突き合わせ用）'
+        required: false
+        default: 'false'
       dump_row:
         description: "true=各OTAの予約一覧の全セルをログに出す（取得項目の調査用・書込なし）"
         required: false
@@ -104,6 +108,7 @@ jobs:
           URKT_ID:       ${{ secrets.URKT_ID }}
           URKT_PASSWORD: ${{ secrets.URKT_PASSWORD }}
           HEADLESS:      "true"
+          RECORD:        ${{ github.event.inputs.record || 'false' }}
           GAS_RECONCILE_URL: ${{ secrets.GAS_RECONCILE_URL }}
           RECONCILE_TOKEN:   ${{ secrets.RECONCILE_TOKEN }}
         run: node reconcile-urakata.js
@@ -226,6 +231,9 @@ jobs:
             automation/reconcile-error.png
             automation/reconcile-urakata-error.png
             automation/reconcile-aj-error.png
+            automation/urakata-trace.zip
+            automation/urakata-page.html
+            automation/urakata-video/**
           if-no-files-found: ignore
           retention-days: 7
 

@@ -54,10 +54,19 @@ async function main() {
     args: ['--disable-blink-features=AutomationControlled'],
   });
   // ヘッドレス検知で明細の展開/描画が変わり statusText が読めない問題を回避
+  // RECORD=true で動画とトレースを残す。ログの断片だけでは
+  // 「サイトが変わったのか」「自動操作にだけ違う画面が出ているのか」を
+  // 区別できず、推測で修正を繰り返してしまったため、実際に見えている
+  // 画面をそのまま残せるようにする。人が見た画面と突き合わせるのが目的。
+  const RECORD = process.env.RECORD === 'true';
   const context = await browser.newContext({
     userAgent: 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
     locale: 'ja-JP', viewport: { width: 1440, height: 900 },
+    ...(RECORD ? { recordVideo: { dir: 'urakata-video', size: { width: 1440, height: 900 } } } : {}),
   });
+  if (RECORD) {
+    await context.tracing.start({ screenshots: true, snapshots: true, sources: false }).catch(() => {});
+  }
   await context.addInitScript(() => { Object.defineProperty(navigator, 'webdriver', { get: () => undefined }); });
   const page = await context.newPage();
 
@@ -159,6 +168,13 @@ async function main() {
     await page.screenshot({ path: 'reconcile-urakata-error.png', fullPage: true }).catch(() => {});
     process.exitCode = 1;
   } finally {
+    if (RECORD) {
+      await context.tracing.stop({ path: 'urakata-trace.zip' }).catch(() => {});
+      // 検索フォームのHTMLもそのまま保存する（DOM構造の突き合わせ用）
+      await fs.promises.writeFile('urakata-page.html',
+        await page.content().catch(() => '')).catch(() => {});
+    }
+    await context.close().catch(() => {});
     await browser.close();
   }
 }
