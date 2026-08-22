@@ -317,6 +317,20 @@ async function setDateRange(page, fromDate, toDate) {
       }
     }
 
+    // 失敗したら検索フォームの実際の入力欄を丸ごと出す。
+    // 「何番目のテキストボックスか」を決め打ちしてきたが、それが当たらなく
+    // なったときに手掛かりが無く、推測での修正を繰り返してしまうため。
+    if (!ok) {
+      const form = await page.evaluate(() => [...document.querySelectorAll('input, select')]
+        .slice(0, 25).map((el, i) => ({
+          i, tag: el.tagName, type: el.type || '', name: el.name || '', id: el.id || '',
+          cls: (el.className || '').toString().slice(0, 60),
+          ph: el.placeholder || '', val: (el.value || '').slice(0, 20),
+          ro: el.readOnly === true, hidden: el.offsetParent === null && el.type !== 'hidden',
+        }))).catch(() => []);
+      log('search_form_dump', { which, inputs: form });
+    }
+
     log(ok ? 'date_set' : 'date_set_fail', { which, ymd: ymd(t), viaTextbox: idx });
     if (!ok) failed.push(which);
   }
