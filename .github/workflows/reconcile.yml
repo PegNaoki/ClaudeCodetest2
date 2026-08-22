@@ -32,7 +32,9 @@ jobs:
     runs-on: ubuntu-latest
     # 既定のジョブ上限は6時間。Chromiumのインストールがハングして5時間以上
     # 枠を占有し、concurrency で後続の実行が全て詰まったことがあるため上限を設ける。
-    timeout-minutes: 45
+    # 在庫反映は枠数に比例して伸びる。48分かかって45分の上限に当たり
+    # 10回連続で打ち切られたため、実測に余裕を持たせて90分にする。
+    timeout-minutes: 90
     env:
       TZ: Asia/Tokyo   # 枠の日付は日本時間で判定する
     steps:
@@ -75,6 +77,9 @@ jobs:
           if [ -z "$GAS_RECONCILE_URL" ] || [ -z "$RECONCILE_TOKEN" ]; then
             echo "GAS_RECONCILE_URL / RECONCILE_TOKEN が未設定のため送信スキップ"; exit 1
           fi
+          # GASへ実際に何件送ったかを残す。GAS側の「一覧に無い予約」通知が
+          # 送信0件によるものか判別できず切り分けに詰まったため。
+          echo "じゃらん 送信件数: $(jq '.reservations | length' jalan-reservations.json)"
           jq --arg t "$RECONCILE_TOKEN" '. + {token: $t}' jalan-reservations.json > payload.json
           # GASは処理後302リダイレクトで応答を返す。curlのPOST→GET変換で応答本文が
           # 取れないことがあるため、判定は「POSTが2xx/3xxで届いたか」を主とし、
@@ -113,6 +118,9 @@ jobs:
           if [ -z "$GAS_RECONCILE_URL" ] || [ -z "$RECONCILE_TOKEN" ]; then
             echo "GAS未設定のため送信スキップ"; exit 1
           fi
+          # GASへ実際に何件送ったかを残す。GAS側の「一覧に無い予約」通知が
+          # 送信0件によるものか判別できず切り分けに詰まったため。
+          echo "ウラカタ 送信件数: $(jq '.reservations | length' urakata-reservations.json)"
           jq --arg t "$RECONCILE_TOKEN" '. + {token: $t}' urakata-reservations.json > payload-urk.json
           HTTP_CODE=$(curl -sS -o response-urk.txt -w "%{http_code}" -X POST "$GAS_RECONCILE_URL" \
             -H "Content-Type: application/json" -d @payload-urk.json)
@@ -143,6 +151,9 @@ jobs:
           if [ -z "$GAS_RECONCILE_URL" ] || [ -z "$RECONCILE_TOKEN" ]; then
             echo "GAS未設定のため送信スキップ"; exit 1
           fi
+          # GASへ実際に何件送ったかを残す。GAS側の「一覧に無い予約」通知が
+          # 送信0件によるものか判別できず切り分けに詰まったため。
+          echo "AJ 送信件数: $(jq '.reservations | length' aj-reservations.json)"
           jq --arg t "$RECONCILE_TOKEN" '. + {token: $t}' aj-reservations.json > payload-aj.json
           HTTP_CODE=$(curl -sS -o response-aj.txt -w "%{http_code}" -X POST "$GAS_RECONCILE_URL" \
             -H "Content-Type: application/json" -d @payload-aj.json)
