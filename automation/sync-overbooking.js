@@ -279,6 +279,29 @@ async function main() {
 //     - request / closed … 自動確定を止める必要がある
 //     - 予約が入っている枠 … 在庫を残Rに合わせる必要がある
 //   期間外の枠も、日が近づいて期間内に入れば自動的に整う。
+// 前回反映した目標を覚えておくファイル。GitHub Actions のキャッシュで
+// 実行間を跨いで持ち回る。読めなければ「全件反映」に倒すので、
+// キャッシュが消えても安全側に落ちるだけで事故にはならない。
+const STATE_PATH = process.env.ENFORCE_STATE_PATH || '.state/enforce-state.json';
+const FULL_SWEEP_INTERVAL_MS = 24 * 3600 * 1000;
+
+function loadState() {
+  try {
+    const st = JSON.parse(fs.readFileSync(STATE_PATH, 'utf8'));
+    if (st && typeof st === 'object' && st.sites) return st;
+  } catch { /* 無ければ初回扱い */ }
+  return { lastFullSweep: null, sites: {} };
+}
+function saveState(st) {
+  try {
+    fs.mkdirSync(STATE_PATH.replace(/\/[^/]+$/, ''), { recursive: true });
+    fs.writeFileSync(STATE_PATH, JSON.stringify(st, null, 2));
+  } catch (e) { log('state_save_failed', { message: e.message }); }
+}
+// 枠1つぶんの「目標」を1つの文字列にする。これが前回と同じなら触らない。
+const slotKey = (p) => `${p.date} ${p.time}`;
+const slotVal = (p) => `${p.mode}|${p.mode === 'immediate' ? p.stock : ''}`;
+
 async function enforce(plan) {
   const horizonDays = parseInt(process.env.SYNC_HORIZON_DAYS || '45', 10);
   const limitDate = jstYmd(jstDate(Date.now() + horizonDays * 86400000));
@@ -286,30 +309,56 @@ async function enforce(plan) {
     p.date <= limitDate || p.mode === 'request' || p.mode === 'closed' || p.booked > 0);
   log('enforce_scope', { total: plan.length, actionable: actionable.length, horizonDays, limitDate });
 
-  const reqSlots = actionable.filter(p => p.mode === 'request').map(p => ({ date: p.date, time: p.time, mode: 'request' }));
-  // 3サイトとも「売止/満席」を実装・検証済み。
-  const clsSlots = actionable.filter(p => p.mode === 'closed').map(p => ({ date: p.date, time: p.time, mode: 'closed' }));
-  const immSlots = actionable.filter(p => p.mode === 'immediate').map(p => ({ date: p.date, time: p.time, mode: 'immediate', stock: p.stock }));
-  const allMode = [...reqSlots, ...clsSlots, ...immSlots];
-  log('enforce_slots', { request: reqSlots.length, closed: clsSlots.length, immediate: immSlots.length });
+  const desired = actionable.map(p => (
+    p.mode === 'immediate'
+      ? { date: p.date, time: p.time, mode: 'immediate', stock: p.stock }
+      : { date: p.date, time: p.time, mode: p.mode }));
 
-  // サイトごとの処理を並列に走らせる。直列だと合計＝各サイトの和になり、
-  // 1サイトの遅さがそのまま全体の遅さになっていた（実測で90分超）。
+  // 全件反映するかの判定。前回から24時間たっていれば全件を掃いて、
+  // 外部要因でOTA側がずれていた場合も必ず拾い直す。
+  const state = loadState();
+  const sinceFull = state.lastFullSweep ? Date.now() - Date.parse(state.lastFullSweep) : Infinity;
+  const fullSweep = process.env.FULL_SWEEP === 'true' || sinceFull > FULL_SWEEP_INTERVAL_MS;
+  log('enforce_mode', {
+    fullSweep,
+    reason: process.env.FULL_SWEEP === 'true' ? '手動指定'
+          : !state.lastFullSweep ? '前回の記録が無い（初回/キャッシュ無し）'
+          : sinceFull > FULL_SWEEP_INTERVAL_MS ? '前回の全件反映から24時間経過' : '差分のみ',
+    lastFullSweep: state.lastFullSweep,
+  });
+
+  const okSites = [];
   const jobs = CONFIG.sites.map(async (site) => {
-    if (allMode.length) {
-      await runNodeAsync(MODE_SCRIPT[site], { SLOTS: JSON.stringify(allMode), DRY_RUN: 'false', HEADLESS: 'true' }, site, 'mode');
-    }
-    // 在庫の絶対値セットは任意（ENFORCE_STOCK=true のときだけ）。
-    // 同一サイト内は直列（同じ画面を同時に触らない）。
+    const prev = state.sites[site] || {};
+    // 目標が前回と同じ枠は触らない。OTA画面を1枠ずつ開くのが重く、
+    // 毎回全件を確認すると1サイト30分近くかかっていたため。
+    const changed = fullSweep ? desired : desired.filter(d => prev[slotKey(d)] !== slotVal(d));
+    log('enforce_target', { site, total: desired.length, changed: changed.length, skippedUnchanged: desired.length - changed.length });
+
+    if (!changed.length) { log('run_skip', { site, reason: '目標に変更なし' }); okSites.push(site); return; }
+
+    const before = process.exitCode;
+    await runNodeAsync(MODE_SCRIPT[site], { SLOTS: JSON.stringify(changed), DRY_RUN: 'false', HEADLESS: 'true' }, site, 'mode');
+
     if (process.env.ENFORCE_STOCK === 'true') {
-      for (const p of immSlots) {
+      for (const p of changed.filter(d => d.mode === 'immediate')) {
         await runNodeAsync(REDUCE_SCRIPT[site], {
           SLOT_DATE: p.date, SLOT_TIME: p.time, SLOT_TARGET_STOCK: String(p.stock), DRY_RUN: 'false', HEADLESS: 'true',
         }, site, 'reduce');
       }
     }
+    // 失敗したサイトは記録を更新しない。次回また対象になり、取りこぼさない。
+    if (process.exitCode === before) okSites.push(site);
   });
   await Promise.all(jobs);
+
+  for (const site of okSites) {
+    const m = state.sites[site] || (state.sites[site] = {});
+    desired.forEach(d => { m[slotKey(d)] = slotVal(d); });
+  }
+  if (fullSweep && okSites.length === CONFIG.sites.length) state.lastFullSweep = new Date().toISOString();
+  saveState(state);
+  log('enforce_state_saved', { okSites, lastFullSweep: state.lastFullSweep });
 }
 
 // サイトごとの反映を子プロセスで実行する。

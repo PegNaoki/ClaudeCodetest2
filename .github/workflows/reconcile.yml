@@ -18,6 +18,10 @@ on:
         description: "true=在庫の絶対値セットも実行（既定はモードのみ）"
         required: false
         default: "false"
+      full_sweep:
+        description: 'true=差分に関係なく全枠を反映する（通常は24時間ごとに自動で実施）'
+        required: false
+        default: 'false'
       record:
         description: 'true=ウラカタ読み取りの動画/トレース/HTMLを保存（画面の突き合わせ用）'
         required: false
@@ -51,6 +55,16 @@ jobs:
       - name: Install dependencies
         working-directory: automation
         run: npm install
+
+      # 前回反映した目標を実行間で持ち回る。これが無いと毎回「全枠」を
+      # 触りに行くことになり、1サイト30分近くかかっていた。
+      # 復元できなければ全件反映に倒れるので、消えても安全側に落ちるだけ。
+      - name: Restore enforce state
+        uses: actions/cache/restore@v4
+        with:
+          path: automation/.state
+          key: enforce-state-${{ github.run_id }}
+          restore-keys: enforce-state-
 
       - name: Install Chromium
         timeout-minutes: 10
@@ -181,6 +195,7 @@ jobs:
         env:
           CAPACITY_CSV_URL: ${{ secrets.CAPACITY_CSV_URL }}
           DRY_RUN: ${{ github.event.inputs.enforce == 'false' && 'true' || 'false' }}
+          FULL_SWEEP: ${{ github.event.inputs.full_sweep || 'false' }}
           ENFORCE_STOCK: ${{ github.event.inputs.enforce_stock || 'false' }}
           # enforce時は各OTAへログインするため認証情報を渡す
           JALAN_ID:       ${{ secrets.JALAN_ID }}
@@ -203,6 +218,13 @@ jobs:
       # シートへの転記が漏れた予約はカレンダーに載らなかった。ここでは各OTAから
       # 読んだ *-reservations.json を直接の入力にする。
       # GCAL_ID / GCAL_SA_KEY 未設定のときは何もせずスキップする。
+      - name: Save enforce state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: automation/.state
+          key: enforce-state-${{ github.run_id }}
+
       - name: Sync Google Calendar
         if: always()
         continue-on-error: true   # カレンダー同期の失敗でReconcile本体を落とさない

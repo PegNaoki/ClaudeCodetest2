@@ -1,3 +1,4 @@
 node_modules/
 automation/error-screenshot.png
 .env
+automation/.state/
