@@ -4,7 +4,8 @@
   "description": "予約が入ったらOTA(じゃらん/ACTIVITY BOARD)の在庫枠を自動で減らす",
   "type": "module",
   "scripts": {
-    "reduce:jalan": "node reduce-jalan-slot.js"
+    "reduce:jalan": "node reduce-jalan-slot.js",
+    "codegen:urakata": "node codegen-urakata.mjs"
   },
   "dependencies": {
     "playwright": "^1.61.1"
