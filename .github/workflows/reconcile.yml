@@ -251,6 +251,7 @@ jobs:
             automation/sync-overbooking-plan.json
             automation/sync-overbooking-plan.md
             automation/reconcile-error.png
+            automation/jalan-login-fail-*.png
             automation/reconcile-urakata-error.png
             automation/reconcile-aj-error.png
             automation/urakata-trace.zip

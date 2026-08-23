@@ -75,8 +75,7 @@ async function main() {
 
   try {
     // ---------- 1. ログイン ----------
-    await page.goto(CONFIG.topUrl, { waitUntil: 'domcontentloaded' });
-    await page.getByRole('link', { name: 'ログイン' }).click();
+    await openLoginForm(page);
     await page.getByRole('textbox', { name: 'AirIDまたはメールアドレス' }).fill(CONFIG.id);
     await page.getByRole('textbox', { name: 'パスワード' }).fill(CONFIG.password);
     await page.getByRole('button', { name: 'ログイン' }).click();
@@ -342,6 +341,39 @@ async function isClosed(page) {
       return r.width === 0 || r.height === 0;
     });
   }, JALAN_POPUP, { timeout: 2500 }).then(() => true).catch(() => false);
+}
+
+// トップpage → ログインフォームを開く。
+// 以前は goto(domcontentloaded) の直後に「ログイン」リンクを押していた。
+// domcontentloaded はHTMLを受け取った時点で先に進むため、JSで描画される
+// 要素はまだ無いことがある。実際に30秒待っても見つからず失敗した回があった。
+// load まで待ち、それでも見つからなければ「その時どのページに居たのか」を
+// 必ず残してから1度だけ読み込み直す（原因を推測で決めないための材料）。
+async function openLoginForm(page) {
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    await page.goto(CONFIG.topUrl, { waitUntil: 'load' }).catch(() => {});
+    await page.waitForLoadState('networkidle').catch(() => {});
+    const link = page.getByRole('link', { name: 'ログイン' }).first();
+    try {
+      await link.waitFor({ state: 'visible', timeout: 15000 });
+      await link.click();
+      log('login_form_opened', { attempt });
+      return;
+    } catch (e) {
+      const diag = await page.evaluate(() => ({
+        url: location.href,
+        title: document.title,
+        links: [...document.querySelectorAll('a')]
+          .map(a => (a.textContent || '').replace(/\s+/g, ' ').trim())
+          .filter(Boolean).slice(0, 25),
+      })).catch(() => null);
+      log('login_link_not_found', { attempt, ...(diag || {}) });
+      await page.screenshot({ path: `jalan-login-fail-${attempt}.png`, fullPage: true }).catch(() => {});
+      if (attempt === 2) {
+        throw new Error(`ログインリンクが見つかりません（URL: ${diag?.url || '不明'} / タイトル: ${diag?.title || '不明'}）`);
+      }
+    }
+  }
 }
 
 main();
