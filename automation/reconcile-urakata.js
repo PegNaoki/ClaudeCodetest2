@@ -285,85 +285,57 @@ async function setDateRange(page, fromDate, toDate) {
 
   const fromIdx = parseInt(process.env.DATE_BOX_FROM || '4', 10);
   const toIdx   = parseInt(process.env.DATE_BOX_TO   || '5', 10);
+
+  // 参加日の欄は「詳細条件」を開かないと操作できない。これを押していなかった
+  // ため、日付が入らないまま検索して0件を得ていた。UIが変わったのではなく
+  // 最初から手順が足りていなかった。
+  const opener = page.getByText('詳細条件を開く', { exact: false }).first();
+  if (await opener.count().catch(() => 0) && await opener.isVisible().catch(() => false)) {
+    await opener.click().catch(() => {});
+    await page.waitForTimeout(800);
+    log('detail_panel_opened');
+  } else {
+    log('detail_panel_absent');   // 既に開いている場合もある
+  }
+
   const boxes = page.getByRole('textbox');
-
   const failed = [];
+
   for (const [idx, t, which] of [[fromIdx, fromDate, 'from'], [toIdx, toDate, 'to']]) {
-    const box = boxes.nth(idx);
     let ok = false;
+    const y = t.getFullYear(), m = t.getMonth() + 1, d = t.getDate();
+    // カレンダーの日付は gridcell。option を探していたため常に0件だった。
+    // 曜日まで含む「Choose 2026年8月10日月曜日」なので前方一致で拾う。
+    const cellName = new RegExp(`Choose ${y}年${m}月${d}日`);
 
-    // 日付欄は name も id も持たない匿名の input[type=text] で、値は
-    // フレームワーク側が管理している。通常の fill() では state に反映されず
-    // 値が消えてしまう（実DOMのダンプで val:"" のままなのを確認）。
-    // ネイティブの value セッターで書いてから input/change を発火させる。
-    for (const v of [ymd(t), ymd(t).replace(/-/g, '/')]) {
-      await page.evaluate(({ i, val }) => {
-        const el = [...document.querySelectorAll('input[type=text]')][i];
-        if (!el) return;
-        const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
-        setter.call(el, val);
-        el.dispatchEvent(new Event('input',  { bubbles: true }));
-        el.dispatchEvent(new Event('change', { bubbles: true }));
-        el.dispatchEvent(new Event('blur',   { bubbles: true }));
-      }, { i: idx, val: v }).catch(() => {});
-      await page.waitForTimeout(400);
-      const got = await page.evaluate((i) => {
-        const el = [...document.querySelectorAll('input[type=text]')][i];
-        return el ? el.value : '';
-      }, idx).catch(() => '');
-      if (got && got.replace(/[\/]/g, '-').startsWith(ymd(t))) { ok = true; break; }
-    }
-    if (ok) { await page.keyboard.press('Escape').catch(() => {}); }
+    await boxes.nth(idx).click().catch(() => {});
+    await page.waitForTimeout(400);
 
-    // 直接入力が効かない実装のときはカレンダーから選ぶ（従来方式）。
-    if (!ok) {
-      await box.click();
-      const nextBtn = page.getByRole('button', { name: 'Next Month' });
-      if (!(await nextBtn.first().isVisible().catch(() => false))) {
-        log('date_box_no_calendar', { which, idx });
-      } else {
-        const y = t.getFullYear(), m = t.getMonth() + 1, d = t.getDate();
-        for (let hop = 0; hop < 24; hop++) {
-          const opt = page.getByRole('option', { name: new RegExp(`Choose ${y}年${m}月${d}日`) });
-          if (await opt.count() > 0 && await opt.first().isVisible().catch(() => false)) {
-            await opt.first().click();
-            await page.waitForTimeout(600);
-            ok = true; break;
-          }
-          await nextBtn.first().click();
-          await page.waitForTimeout(300);
-        }
-        // 見つからなかったときは、実際に何が並んでいるのかを残す。
-        // ラベル書式が変わったのか、カレンダー自体が出ていないのかを
-        // ログだけで切り分けられるようにする。
-        if (!ok) {
-          const opts = await page.getByRole('option').evaluateAll(
-            els => els.slice(0, 10).map(e => e.getAttribute('aria-label') || e.textContent.trim())
-          ).catch(() => []);
-          log('date_option_dump', { which, options: opts });
-        }
+    const nextBtn = page.getByRole('button', { name: 'Next Month' });
+    for (let hop = 0; hop < 24; hop++) {
+      const cell = page.getByRole('gridcell', { name: cellName });
+      if (await cell.count().catch(() => 0) && await cell.first().isVisible().catch(() => false)) {
+        await cell.first().click();
+        await page.waitForTimeout(500);
+        ok = true; break;
       }
+      if (!(await nextBtn.first().isVisible().catch(() => false))) break;
+      await nextBtn.first().click().catch(() => {});
+      await page.waitForTimeout(300);
     }
 
-    // 失敗したら検索フォームの実際の入力欄を丸ごと出す。
-    // 「何番目のテキストボックスか」を決め打ちしてきたが、それが当たらなく
-    // なったときに手掛かりが無く、推測での修正を繰り返してしまうため。
+    // 失敗時は実際に並んでいる日付セルを出す（書式変更の切り分け用）
     if (!ok) {
-      const form = await page.evaluate(() => [...document.querySelectorAll('input, select')]
-        .slice(0, 25).map((el, i) => ({
-          i, tag: el.tagName, type: el.type || '', name: el.name || '', id: el.id || '',
-          cls: (el.className || '').toString().slice(0, 60),
-          ph: el.placeholder || '', val: (el.value || '').slice(0, 20),
-          ro: el.readOnly === true, hidden: el.offsetParent === null && el.type !== 'hidden',
-        }))).catch(() => []);
-      log('search_form_dump', { which, inputs: form });
+      const cells = await page.getByRole('gridcell').evaluateAll(
+        els => els.slice(0, 8).map(e => e.getAttribute('aria-label') || e.textContent.trim())
+      ).catch(() => []);
+      log('date_gridcell_dump', { which, cells });
     }
-
     log(ok ? 'date_set' : 'date_set_fail', { which, ymd: ymd(t), viaTextbox: idx });
     if (!ok) failed.push(which);
   }
 
-  // 日付が入らないまま検索すると全期間や0件が返り、それを正常な「予約なし」と
+  // 日付が入らないまま検索すると0件が返り、それを正常な「予約なし」と
   // 誤って扱ってしまう。実際にGASへ空の一覧を送り、既存予約が消えたように
   // 見える誤検知通知が出続けた。ここで明確に失敗させる。
   if (failed.length) {
