@@ -28,7 +28,7 @@
 // ============================================================
 
 import fs from 'fs';
-import { execFileSync } from 'child_process';
+import { execFile } from 'child_process';
 
 const CONFIG = {
   capacityCsvUrl: process.env.CAPACITY_CSV_URL || '',
@@ -265,7 +265,7 @@ async function main() {
   }
 
   // ---- enforce（DRY_RUN=false）：各OTAへ絶対値で反映 ----
-  enforce(plan);
+  await enforce(plan);
   log('done', { mode: 'enforce', slots: plan.length });
 }
 
@@ -279,44 +279,62 @@ async function main() {
 //     - request / closed … 自動確定を止める必要がある
 //     - 予約が入っている枠 … 在庫を残Rに合わせる必要がある
 //   期間外の枠も、日が近づいて期間内に入れば自動的に整う。
-function enforce(plan) {
+async function enforce(plan) {
   const horizonDays = parseInt(process.env.SYNC_HORIZON_DAYS || '45', 10);
   const limitDate = jstYmd(jstDate(Date.now() + horizonDays * 86400000));
   const actionable = plan.filter(p =>
     p.date <= limitDate || p.mode === 'request' || p.mode === 'closed' || p.booked > 0);
   log('enforce_scope', { total: plan.length, actionable: actionable.length, horizonDays, limitDate });
-  for (const site of CONFIG.sites) {
-    const reqSlots = actionable.filter(p => p.mode === 'request').map(p => ({ date: p.date, time: p.time, mode: 'request' }));
-    // 3サイトとも「売止/満席」を実装・検証済み。
-    const clsSlots = actionable.filter(p => p.mode === 'closed').map(p => ({ date: p.date, time: p.time, mode: 'closed' }));
-    const immSlots = actionable.filter(p => p.mode === 'immediate').map(p => ({ date: p.date, time: p.time, mode: 'immediate', stock: p.stock }));
 
-    // モードはバッチ対応（SLOTS）。request / closed / immediate をまとめて渡す。
-    const allMode = [...reqSlots, ...clsSlots, ...immSlots];
+  const reqSlots = actionable.filter(p => p.mode === 'request').map(p => ({ date: p.date, time: p.time, mode: 'request' }));
+  // 3サイトとも「売止/満席」を実装・検証済み。
+  const clsSlots = actionable.filter(p => p.mode === 'closed').map(p => ({ date: p.date, time: p.time, mode: 'closed' }));
+  const immSlots = actionable.filter(p => p.mode === 'immediate').map(p => ({ date: p.date, time: p.time, mode: 'immediate', stock: p.stock }));
+  const allMode = [...reqSlots, ...clsSlots, ...immSlots];
+  log('enforce_slots', { request: reqSlots.length, closed: clsSlots.length, immediate: immSlots.length });
+
+  // サイトごとの処理を並列に走らせる。直列だと合計＝各サイトの和になり、
+  // 1サイトの遅さがそのまま全体の遅さになっていた（実測で90分超）。
+  const jobs = CONFIG.sites.map(async (site) => {
     if (allMode.length) {
-      runNode(MODE_SCRIPT[site], { SLOTS: JSON.stringify(allMode), DRY_RUN: 'false', HEADLESS: 'true' }, site, 'mode');
+      await runNodeAsync(MODE_SCRIPT[site], { SLOTS: JSON.stringify(allMode), DRY_RUN: 'false', HEADLESS: 'true' }, site, 'mode');
     }
     // 在庫の絶対値セットは任意（ENFORCE_STOCK=true のときだけ）。
-    // 既定はモードのみ反映＝各サイト1ログインで軽く、オーバーブッキング防御の本体を担う。
-    // 在庫の細かい数合わせは既存の差分連動(reduce-*)がリアルタイムで担当する。
+    // 同一サイト内は直列（同じ画面を同時に触らない）。
     if (process.env.ENFORCE_STOCK === 'true') {
       for (const p of immSlots) {
-        runNode(REDUCE_SCRIPT[site], {
+        await runNodeAsync(REDUCE_SCRIPT[site], {
           SLOT_DATE: p.date, SLOT_TIME: p.time, SLOT_TARGET_STOCK: String(p.stock), DRY_RUN: 'false', HEADLESS: 'true',
         }, site, 'reduce');
       }
     }
-  }
+  });
+  await Promise.all(jobs);
 }
-function runNode(script, extraEnv, site, kind) {
-  try {
-    log('run', { site, kind, script });
-    execFileSync('node', [script], { stdio: 'inherit', env: { ...process.env, ...extraEnv } });
-  } catch (e) {
-    // 1サイトの失敗で全体を止めない（他サイトの同期は続行）。exitCodeは立てる。
-    log('run_error', { site, kind, message: e.message });
-    process.exitCode = 1;
-  }
+
+// サイトごとの反映を子プロセスで実行する。
+// 3サイトを直列に回していたため、1サイトが遅いと全体がその分だけ伸びていた。
+// サイト同士は別サービス・別ログインで干渉しないので並列に走らせる。
+// 反映内容そのものは変えない（どの枠をどう変えるかは従来どおり）。
+function runNodeAsync(script, extraEnv, site, kind) {
+  log('run', { site, kind, script });
+  const started = Date.now();
+  return new Promise((resolve) => {
+    execFile('node', [script],
+      { env: { ...process.env, ...extraEnv }, maxBuffer: 64 * 1024 * 1024 },
+      (err, stdout, stderr) => {
+        const sec = Math.round((Date.now() - started) / 1000);
+        // 出力が混ざらないよう、サイトごとにまとめて印字する
+        process.stdout.write(`\n===== ${site}/${kind} の出力（${sec}秒）=====\n${stdout || ''}${stderr || ''}`);
+        if (err) {
+          log('run_error', { site, kind, sec, message: err.message });
+          process.exitCode = 1;
+        } else {
+          log('run_done', { site, kind, sec });
+        }
+        resolve();
+      });
+  });
 }
 
 main().catch(e => { log('error', { message: e.message }); process.exitCode = 1; });
