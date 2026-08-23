@@ -282,7 +282,10 @@ async function jumpToDate(page, ymd) {
     if (!(await nextBtn.first().isVisible().catch(() => false))) continue;
     let stuck = false;
     for (let hop = 0; hop < 18; hop++) {
-      const opt = page.getByRole('option', { name: new RegExp(`Choose ${y}年${m}月${d}日`) });
+      // 日付セルの role は gridcell。option で探していたため常に0件になり、
+      // 「カレンダー入力欄が見つからない」と誤判定していた（予約検索側と同じ誤り）。
+      // 実際のラベルは曜日込みの「Choose 2026年8月10日月曜日」。
+      const opt = page.getByRole('gridcell', { name: new RegExp(`Choose ${y}年${m}月${d}日`) });
       if (await opt.count() > 0 && await opt.first().isVisible().catch(() => false)) {
         await opt.first().click();
         await page.waitForTimeout(1200);
