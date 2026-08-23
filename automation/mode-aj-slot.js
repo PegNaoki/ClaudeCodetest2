@@ -134,15 +134,22 @@ async function main() {
         // 枠がAJに存在しない/月に届かない等のデータ不整合は「スキップ」（全体は失敗にしない）。
         // 保存検証NGなど運用上の異常だけを「error」として失敗＋通知対象にする。
         const skip = /見つかりません|移動できません/.test(e.message);
-        log(skip ? 'slot_skip' : 'slot_error', { date: task.date, time: task.time, mode: task.mode, message: e.message });
-        results.push({ ...task, result: skip ? 'skipped' : 'error', message: e.message });
+        // スキップ理由を分けて持つ。「枠が未開設」と「月へ移動できない」を
+        // どちらも skipped で一括りにしていたため、月移動の失敗を
+        // 「AJに枠が無い」と誤って報告していた。
+        const reason = /移動できません/.test(e.message) ? 'month_nav'
+                     : /未開設|status無し/.test(e.message) ? 'no_slot' : 'other';
+        log(skip ? 'slot_skip' : 'slot_error', { date: task.date, time: task.time, mode: task.mode, reason, message: e.message });
+        results.push({ ...task, result: skip ? 'skipped' : 'error', reason, message: e.message });
       }
     }
 
     const ok      = results.filter(r => ['switched', 'already', 'dry_run'].includes(r.result)).length;
-    const skipped = results.filter(r => r.result === 'skipped').length;
+    const skipped = results.filter(r => r.result === 'skipped');
     const ng      = results.filter(r => r.result === 'error').length;
-    log('done', { total: results.length, ok, skipped, ng });
+    // 内訳を出す。月移動の失敗が多いなら枠が無いのではなく辿り着けていない。
+    const byReason = skipped.reduce((a, r) => { a[r.reason || 'other'] = (a[r.reason || 'other'] || 0) + 1; return a; }, {});
+    log('done', { total: results.length, ok, skipped: skipped.length, skippedBy: byReason, ng });
     if (ng > 0) { process.exitCode = 1; } // 本当の異常時のみ失敗（🚨通知が飛ぶ）
     await page.screenshot({ path: 'result-aj-mode.png', fullPage: true }).catch(() => {});
   } catch (err) {
@@ -189,7 +196,7 @@ async function switchOneSlot(page, task) {
     log('slot_skip', { date, time, mode,
       message: `対象日の枠が見つかりません（候補${cands.length}件すべて status 無し。AJ側で枠が未開設の可能性）`,
       candidates: cands.map(c => `${c.plan}_${c.course}`) });
-    return { result: 'skipped', message: '対象日の枠が未開設（status無し）' };
+    return { result: 'skipped', reason: 'no_slot', message: '対象日の枠が未開設（status無し）' };
   }
   const targetStatus = { request: 3, closed: 4, immediate: 1 }[mode];
   log('slot_before', { date, time, mode, statusId, beforeStatus, meaning: statusMeaning(beforeStatus) });
@@ -283,34 +290,59 @@ async function ensureMonthShown(page, compact) {
 
   const year  = Number(compact.slice(0, 4));
   const month = Number(compact.slice(4, 6));
+  const want  = `${year}年${month}月`;
+  const key   = (t) => { const m = String(t).match(/(\d{4})年(\d{1,2})月/); return m ? Number(m[1]) * 12 + Number(m[2]) : -1; };
+  const target = key(want);
 
-  // 「YYYY年M月」ボタンをテキスト内容で走査してクリックする。
-  // 描画のAJAX遅延に備え waitForSelector で待ち、数回リトライする。
-  for (let attempt = 1; attempt <= 4; attempt++) {
-    const clicked = await page.evaluate(({ year, month }) => {
-      const want = `${year}年${month}月`;
-      const els = [...document.querySelectorAll('button, a, [role="button"]')];
-      const el = els.find(e => (e.textContent || '').replace(/\s+/g, '') === want);
-      if (el) { el.click(); return true; }
-      return false;
-    }, { year, month });
-    if (clicked) {
-      try {
-        await page.waitForSelector(`.day_${compact}`, { timeout: 6000 });
-        log('month_ok', { compact, via: 'textScan', attempt });
-        return;
-      } catch { /* 未描画。次のリトライへ */ }
+  const listMonths = () => page.evaluate(() =>
+    [...document.querySelectorAll('button, a, [role="button"]')]
+      .map(e => (e.textContent || '').replace(/\s+/g, ''))
+      .filter(t => /^\d{4}年\d{1,2}月$/.test(t)));
+
+  const clickMonth = (label) => page.evaluate((w) => {
+    const el = [...document.querySelectorAll('button, a, [role="button"]')]
+      .find(e => (e.textContent || '').replace(/\s+/g, '') === w);
+    if (el) { el.click(); return true; }
+    return false;
+  }, label);
+
+  // 目的の月ボタンが画面に無いことがある（近い月しか出ない）。その場合は
+  // 表示されている中で目的月に最も近い先の月へ進み、再走査して辿っていく。
+  // 以前は「目的月のボタンが無ければ即あきらめる」実装だったため、9〜11月が
+  // まとめて「枠が無い」扱いになっていた。実際は月へ移動できていないだけ。
+  let last = '';
+  for (let hop = 0; hop < 14; hop++) {
+    const months = await listMonths();
+
+    if (months.includes(want)) {
+      if (await clickMonth(want)) {
+        try {
+          await page.waitForSelector(`.day_${compact}`, { timeout: 8000 });
+          log('month_ok', { compact, via: 'textScan', hop });
+          return;
+        } catch { /* 未描画。次へ */ }
+      }
     }
-    await page.waitForTimeout(600);
+
+    // 目的月へ近づく踏み台を選ぶ。目的より手前で最も先の月、無ければ最も先の月。
+    const below = months.filter(t => key(t) < target).sort((a, b) => key(b) - key(a));
+    const step  = below[0] || months.sort((a, b) => key(b) - key(a))[0];
+    if (!step || step === last) {
+      log('month_nav_stuck', { compact, hop, months });
+      break;                       // これ以上進めない
+    }
+    log('month_nav', { compact, hop, step, months });
+    last = step;
+    await clickMonth(step);
+    await page.waitForTimeout(700);
     await page.waitForLoadState('networkidle').catch(() => {});
   }
 
-  // 見つからない場合は候補をログに出して停止（手掛かり用）
   const buttons = await page.$$eval('button', els => els.map(e => (e.textContent || '').replace(/\s+/g, '').trim()).filter(t => /\d{4}年\d{1,2}月/.test(t)).slice(0, 20)).catch(() => []);
-  const months = await page.$$eval('[class*="_day"]', els => {
+  const shown = await page.$$eval('[class*="_day"]', els => {
     const s = new Set(); els.forEach(e => { const m = (e.className.match(/(\d{4}-\d{2})_day/) || [])[1]; if (m) s.add(m); }); return [...s];
   }).catch(() => []);
-  throw new SlotSyncError(`対象月に移動できません（${compact}）。月ボタン候補: ${JSON.stringify(buttons)} / 表示中: ${JSON.stringify(months)}`);
+  throw new SlotSyncError(`対象月に移動できません（${compact}）。月ボタン候補: ${JSON.stringify(buttons)} / 表示中: ${JSON.stringify(shown)}`);
 }
 
 // ボタンを「表示テキストの完全一致」で押す。getByRole の accessible name は

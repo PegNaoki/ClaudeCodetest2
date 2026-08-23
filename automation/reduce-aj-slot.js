@@ -249,40 +249,63 @@ async function openCalendarMenu(page) {
 // 対象日(YYYYMMDD)のセルが表示されるまで対象月へ移動する。
 // AJは「2026年8月」のような月ボタンを直接クリックして飛ぶ方式。
 async function ensureMonthShown(page, compact) {
-  // 既に表示済みならOK
   if (await page.locator(`.day_${compact}`).count() > 0) { log('month_ok', { compact, nav: 0 }); return; }
 
   const year  = Number(compact.slice(0, 4));
   const month = Number(compact.slice(4, 6));
+  const want  = `${year}年${month}月`;
+  const key   = (t) => { const m = String(t).match(/(\d{4})年(\d{1,2})月/); return m ? Number(m[1]) * 12 + Number(m[2]) : -1; };
+  const target = key(want);
 
-  // 「YYYY年M月」ボタンを押す。getByRole の accessible name では拾えない
-  // ケース（遠い月など）があるため、テキスト内容で該当ボタンを走査して
-  // クリックする。描画のAJAX遅延に備え waitForSelector で待ち、数回リトライ。
-  for (let attempt = 1; attempt <= 4; attempt++) {
-    const clicked = await page.evaluate(({ year, month }) => {
-      const want = `${year}年${month}月`;
-      const els = [...document.querySelectorAll('button, a, [role="button"]')];
-      const el = els.find(e => (e.textContent || '').replace(/\s+/g, '') === want);
-      if (el) { el.click(); return true; }
-      return false;
-    }, { year, month });
-    if (clicked) {
-      try {
-        await page.waitForSelector(`.day_${compact}`, { timeout: 6000 });
-        log('month_ok', { compact, via: 'textScan', attempt });
-        return;
-      } catch { /* 未描画。次のリトライへ */ }
+  const listMonths = () => page.evaluate(() =>
+    [...document.querySelectorAll('button, a, [role="button"]')]
+      .map(e => (e.textContent || '').replace(/\s+/g, ''))
+      .filter(t => /^\d{4}年\d{1,2}月$/.test(t)));
+
+  const clickMonth = (label) => page.evaluate((w) => {
+    const el = [...document.querySelectorAll('button, a, [role="button"]')]
+      .find(e => (e.textContent || '').replace(/\s+/g, '') === w);
+    if (el) { el.click(); return true; }
+    return false;
+  }, label);
+
+  // 目的の月ボタンが画面に無いことがある（近い月しか出ない）。その場合は
+  // 表示されている中で目的月に最も近い先の月へ進み、再走査して辿っていく。
+  // 以前は「目的月のボタンが無ければ即あきらめる」実装だったため、9〜11月が
+  // まとめて「枠が無い」扱いになっていた。実際は月へ移動できていないだけ。
+  let last = '';
+  for (let hop = 0; hop < 14; hop++) {
+    const months = await listMonths();
+
+    if (months.includes(want)) {
+      if (await clickMonth(want)) {
+        try {
+          await page.waitForSelector(`.day_${compact}`, { timeout: 8000 });
+          log('month_ok', { compact, via: 'textScan', hop });
+          return;
+        } catch { /* 未描画。次へ */ }
+      }
     }
-    await page.waitForTimeout(600);
+
+    // 目的月へ近づく踏み台を選ぶ。目的より手前で最も先の月、無ければ最も先の月。
+    const below = months.filter(t => key(t) < target).sort((a, b) => key(b) - key(a));
+    const step  = below[0] || months.sort((a, b) => key(b) - key(a))[0];
+    if (!step || step === last) {
+      log('month_nav_stuck', { compact, hop, months });
+      break;                       // これ以上進めない
+    }
+    log('month_nav', { compact, hop, step, months });
+    last = step;
+    await clickMonth(step);
+    await page.waitForTimeout(700);
     await page.waitForLoadState('networkidle').catch(() => {});
   }
 
-  // 見つからない場合は候補をログに出して停止（手掛かり用）
   const buttons = await page.$$eval('button', els => els.map(e => (e.textContent || '').replace(/\s+/g, '').trim()).filter(t => /\d{4}年\d{1,2}月/.test(t)).slice(0, 20)).catch(() => []);
-  const months = await page.$$eval('[class*="_day"]', els => {
+  const shown = await page.$$eval('[class*="_day"]', els => {
     const s = new Set(); els.forEach(e => { const m = (e.className.match(/(\d{4}-\d{2})_day/) || [])[1]; if (m) s.add(m); }); return [...s];
   }).catch(() => []);
-  throw new SlotSyncError(`対象月に移動できません。月ボタン候補: ${JSON.stringify(buttons)} / 表示中: ${JSON.stringify(months)}`);
+  throw new SlotSyncError(`対象月に移動できません（${compact}）。月ボタン候補: ${JSON.stringify(buttons)} / 表示中: ${JSON.stringify(shown)}`);
 }
 
 // hidden input の在庫値を読む（idが数字始まりのため属性セレクタを使う）
