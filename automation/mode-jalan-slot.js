@@ -250,9 +250,37 @@ async function switchOneSlot(mng, task) {
     await saleSel.selectOption('false');
   } else {
     // 売止から復帰できるよう、必ず「販売」に戻したうえで予約方式を設定する。
-    if (await saleSel.count() > 0) await saleSel.selectOption('true').catch(() => {});
+    // ここを黙って握りつぶしていたため、売止の枠で予約方式のselectが
+    // 隠れたままになり「hidden のまま10秒待って失敗」を繰り返していた。
+    if (await saleSel.count() === 0) {
+      throw new Error('販売可否のselectが見つからない（パネルが開いていない可能性）');
+    }
+    try {
+      await saleSel.selectOption('true');
+    } catch (e) {
+      throw new Error(`販売への戻しに失敗: ${e.message}`);
+    }
+    // 予約方式のselectは販売状態の変更後に再描画されて現れる。
+    await mng.waitForTimeout(600);
+
     const sel = mng.locator('select[name="reservationType"]').first();
-    await sel.waitFor({ state: 'visible', timeout: 10000 });
+    try {
+      await sel.waitFor({ state: 'visible', timeout: 10000 });
+    } catch (e) {
+      // 断定材料が無いまま推測しないよう、その時点のパネルの中身を残す。
+      const panel = await mng.evaluate(() => [...document.querySelectorAll('select')].map((el) => {
+        const r = el.getBoundingClientRect();
+        return {
+          name: el.getAttribute('name') || '',
+          cls: el.className || '',
+          value: el.value,
+          shown: r.width > 0 && r.height > 0 && getComputedStyle(el).visibility !== 'hidden',
+          options: [...el.options].slice(0, 8).map((o) => `${o.value}:${(o.textContent || '').trim()}`),
+        };
+      })).catch(() => []);
+      log('panel_dump', { date, time, mode, selects: panel });
+      throw e;
+    }
     await sel.selectOption(targetRt);
   }
 
