@@ -20,6 +20,7 @@
 // ============================================================
 
 import { chromium } from 'playwright';
+import { dismissUrakataOverlay } from './urakata-overlay.js';
 import fs from 'fs';
 import { normalize, splitKana, splitPrice } from './reservation-schema.js';
 
@@ -215,6 +216,8 @@ async function urakataLogin(page) {
   }
 
   await searchLink.first().waitFor({ state: 'visible', timeout: 20000 });
+  // 案内モーダルが出ていると以降の操作が全て届かなくなるので、ここでどかす。
+  await dismissUrakataOverlay(page, log);
   log('login_ok');
 }
 

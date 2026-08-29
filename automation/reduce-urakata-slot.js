@@ -20,6 +20,7 @@
 // ============================================================
 
 import { chromium } from 'playwright';
+import { dismissUrakataOverlay } from './urakata-overlay.js';
 import fs from 'fs';
 
 const CONFIG = {
@@ -95,7 +96,14 @@ async function main() {
     await urakataLogin(page, CONFIG.topUrl, CONFIG.id, CONFIG.password, '予約枠');
 
     // ---------- 2. 予約枠ページへ ----------
-    await page.getByRole('link', { name: '予約枠' }).click();
+    // 案内モーダルがクリックを遮ることがあるので、先にどかす。
+    await dismissUrakataOverlay(page, log);
+    await page.getByRole('link', { name: '予約枠' }).click({ timeout: 15000 })
+      .catch(async (e) => {
+        // 遮っていたものが後から出た場合に備え、もう一度だけどかして押す。
+        await dismissUrakataOverlay(page, log);
+        await page.getByRole('link', { name: '予約枠' }).click({ timeout: 15000 });
+      });
     await page.waitForLoadState('networkidle');
     await page.waitForSelector('[data-test=courseName]', { timeout: 20000 });
     log('slot_page_opened');
