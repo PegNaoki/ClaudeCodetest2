@@ -236,6 +236,8 @@ async function switchOneSlot(mng, task) {
   // 2. セルのリンクを開いてパネルを変更 → 一括変更する
   const link = cell.locator('a.action-link, a').first();
   await link.click();
+  // パネルはクリック後に描画される。待たずに探すと必ず0件になる。
+  await mng.waitForLoadState('networkidle').catch(() => {});
 
   // 販売可否は予約方式(reservationType)とは独立した軸。
   //   '' = 変更しない / 'true' = 販売 / 'false' = 売止
@@ -252,8 +254,24 @@ async function switchOneSlot(mng, task) {
     // 売止から復帰できるよう、必ず「販売」に戻したうえで予約方式を設定する。
     // ここを黙って握りつぶしていたため、売止の枠で予約方式のselectが
     // 隠れたままになり「hidden のまま10秒待って失敗」を繰り返していた。
-    if (await saleSel.count() === 0) {
-      throw new Error('販売可否のselectが見つからない（パネルが開いていない可能性）');
+    // count() は待たない。前回はクリックの30ms後に0件と判定して落ちていた。
+    try {
+      await saleSel.waitFor({ state: 'visible', timeout: 15000 });
+    } catch (e) {
+      // パネルが開かないのか、開いてもselectが無いのかを次回切り分けるため、
+      // セルのHTMLと画面上のselect一覧を残す。
+      const cellHtml = await cell.evaluate((el) => el.outerHTML).catch(() => '');
+      const selects = await mng.evaluate(() => [...document.querySelectorAll('select')].map((el) => {
+        const r = el.getBoundingClientRect();
+        return {
+          name: el.getAttribute('name') || '',
+          cls: el.className || '',
+          shown: r.width > 0 && r.height > 0 && getComputedStyle(el).visibility !== 'hidden',
+          options: [...el.options].slice(0, 8).map((o) => `${o.value}:${(o.textContent || '').trim()}`),
+        };
+      })).catch(() => []);
+      log('panel_dump', { date, time, mode, url: mng.url(), selects, cellHtml: cellHtml.slice(0, 800) });
+      throw new Error(`販売可否のselectが15秒待っても現れない（パネルが開いていない可能性）: ${e.message}`);
     }
     try {
       await saleSel.selectOption('true');
