@@ -22,6 +22,7 @@
 // ============================================================
 
 import { chromium } from 'playwright';
+import { splitImplausible } from './slot-sanity.js';
 import { dismissUrakataOverlay } from './urakata-overlay.js';
 import fs from 'fs';
 
@@ -97,7 +98,12 @@ function assertConfig() {
 
 async function main() {
   assertConfig();
-  const tasks = buildTasks();
+  const { tasks, ignored } = splitImplausible(buildTasks(), log);
+  if (tasks.length === 0) {
+    // 実在しない枠しか来なかった。触るものが無いので正常終了する。
+    log('done', { total: 0, ok: 0, skipped: ignored.length, ng: 0 });
+    return;
+  }
   log('start', { count: tasks.length, dryRun: CONFIG.dryRun });
 
   const browser = await chromium.launch({
